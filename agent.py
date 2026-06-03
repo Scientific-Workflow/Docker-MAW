@@ -210,32 +210,44 @@ Now apply this same structure and level of detail to the paper and goal provided
 """
 
 INSTALLER_PROMPT = """\
-You are an HPC environment specialist. Given a list of required software packages and scientific workflow context, generate a valid Dockerfile that installs all dependencies into an Ubuntu 22.04 container.
+You are an HPC environment specialist. Given a list of required software packages and scientific workflow context, generate a valid Dockerfile that installs all dependencies into an Ubuntu 24.04 container.
+
+This Dockerfile must work on all three platforms without modification:
+- macOS (Apple Silicon / ARM64) running Docker Desktop
+- Windows running Docker Desktop (x86_64 or ARM64)
+- Linux HPC (x86_64)
 
 Return a JSON object with exactly one key:
 - dockerfile_content: string — the complete, valid Dockerfile
 
 The Dockerfile MUST:
-1. Start with: FROM ubuntu:22.04
+1. Start with: FROM ubuntu:24.04
+   REASON: Ubuntu 24.04 ships glibc 2.39 and Python 3.12, both required by the OVITO ARM64 wheel.
+   Do NOT use ubuntu:22.04 — it has glibc 2.35 and Python 3.10, which are incompatible with OVITO on ARM64.
 2. Set: ENV DEBIAN_FRONTEND=noninteractive
 3. Install system dependencies AND MPI libraries together:
-   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*
-4. CRITICAL — fix MPI shared library name immediately after. The lammps pip wheel was compiled against libmpi.so.12 but Ubuntu 22.04 ships a newer version with a different filename. This symlink is mandatory or LAMMPS will crash at runtime. Use a shell variable so the path is resolved dynamically and works on both x86_64 and ARM64:
+   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin libosmesa6 && rm -rf /var/lib/apt/lists/*
+4. CRITICAL — fix MPI shared library name immediately after. The lammps pip wheel was compiled against libmpi.so.12 but Ubuntu 24.04 ships a newer version with a different filename. This symlink is mandatory or LAMMPS will crash at runtime. Use a shell variable so the path is resolved dynamically and works on both x86_64 and ARM64:
    RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v libmpi_cxx | sort | tail -1) && ln -sf "$MPI_SO" "$(dirname $MPI_SO)/libmpi.so.12" && ldconfig
 5. Upgrade pip: RUN pip3 install --upgrade pip
 6. Install LAMMPS via pip wheel: RUN pip3 install lammps
-7. Install all other pip-installable packages from the provided stack list
-8. Set working directory: WORKDIR /app
-9. Set headless rendering env vars:
-   ENV LIBGL_ALWAYS_SOFTWARE=1
-   ENV PYOPENGL_PLATFORM=osmesa
-   ENV OVITO_GUI_MODE=0
-   ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+7. Install OVITO — CRITICAL: standard PyPI has no ARM64 Linux wheel. You MUST use the break-system-packages flag since Ubuntu 24.04 enforces PEP 668:
+   RUN pip3 install ovito --break-system-packages
+8. Install parsl and numpy with break-system-packages:
+   RUN pip3 install "parsl>=2024.0.0" numpy --break-system-packages
+9. Install any other packages from the stack list the same way (--break-system-packages)
+10. Set working directory: WORKDIR /app
+11. Set headless rendering env vars for OVITO (required on all platforms for non-GUI rendering):
+    ENV LIBGL_ALWAYS_SOFTWARE=1
+    ENV PYOPENGL_PLATFORM=osmesa
+    ENV OVITO_GUI_MODE=0
 
 Rules:
+- Do NOT use ubuntu:22.04 — use ubuntu:24.04
 - Do NOT build LAMMPS from source
 - Do NOT use conda or mamba
 - Do NOT skip the libmpi.so.12 symlink — LAMMPS will fail at runtime without it
+- Always use --break-system-packages on every pip3 install — Ubuntu 24.04 requires it
 - Do NOT include markdown code fences or any text outside the JSON
 - Return ONLY a valid JSON object
 
