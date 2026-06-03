@@ -1,0 +1,50 @@
+{
+    "$schema": "https://opencode.ai/config.json",
+    "provider": {
+        "myprovider": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Argo",
+            "options": {
+                "baseURL": "https://apps-dev.inside.anl.gov/argoapi/v1",
+                "apiKey": "jacob.oh"
+            },
+            "models": {
+                "gpt52": {
+                    "name": "Argo GPT-5.2",
+                    "limit": {
+                        "context": 200000,
+                        "output": 65536
+                    }
+                },
+                "gpt5mini": {
+                    "name": "Argo GPT-5 mini",
+                    "limit": {
+                        "context": 200000,
+                        "output": 65536
+                    }
+                },
+                "gemini25pro": {
+                    "name": "Argo Gemini-2.5-Pro"
+                },
+                "gemini25flash": {
+                    "name": "Argo Gemini-2.5-Flash"
+                },
+                "claudesonnet46": {
+                    "name": "Argo Claude Sonnet 4.6",
+                    "limit": {
+                        "context": 136000,
+                        "output": 64000
+                    }
+                },
+                "claudeopus46": {
+                    "name": "Argo Claude Opus 4.6",
+                    "limit": {
+                        "context": 168000,
+                        "output": 64000
+                    }
+                }
+            }
+        }
+    }
+}
+
