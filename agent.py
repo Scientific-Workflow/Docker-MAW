@@ -623,18 +623,45 @@ def installer(state: AgentState) -> dict:
                 )),
             ])
 
+            # ── Post-process: enforce platform-safe base image and OVITO install ──
+            # The LLM sometimes ignores the ubuntu:24.04 instruction and uses 22.04,
+            # which breaks OVITO on ARM64 (requires glibc 2.39 / Python 3.12+).
+            # We correct this deterministically rather than relying on LLM compliance.
+            import re as _re
+            dockerfile = result.dockerfile_content
+
+            # 1. Force base image to ubuntu:24.04
+            dockerfile = _re.sub(r'FROM\s+ubuntu:\S+', 'FROM ubuntu:24.04', dockerfile)
+
+            # 2. Fix any bare `pip3 install ovito` to add --break-system-packages
+            #    (required on Ubuntu 24.04 due to PEP 668 enforcement)
+            dockerfile = _re.sub(
+                r'(pip3\s+install\b(?:\s+--[^\s]+)*\s+ovito(?:[^\n]*))(?<!\-\-break\-system\-packages)',
+                lambda m: m.group(0) if '--break-system-packages' in m.group(0) else m.group(0) + ' --break-system-packages',
+                dockerfile,
+            )
+
+            # 3. Add --break-system-packages to all other pip3 install lines on 24.04
+            dockerfile = _re.sub(
+                r'(pip3\s+install\b(?:\s+--[^\s]+)*\s+(?!--)[^\n]+?)(\n)',
+                lambda m: m.group(0) if '--break-system-packages' in m.group(0) else m.group(1) + ' --break-system-packages\n',
+                dockerfile,
+            )
+
+            console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages[/dim cyan]")
+
             with open(dockerfile_path, "w") as f:
-                f.write(result.dockerfile_content)
+                f.write(dockerfile)
 
             console.print(Panel(
-                result.dockerfile_content,
+                dockerfile,
                 title="[bold yellow]Dockerfile — Pending Orchestrator Approval[/bold yellow]",
                 border_style="yellow",
             ))
             console.print("[dim yellow][installer] Dockerfile written — waiting for orchestrator approval before building image...[/dim yellow]")
 
             return {
-                "dockerfile":   result.dockerfile_content,
+                "dockerfile":   dockerfile,
                 "current_step": "installer_dockerfile_pending_approval",
             }
 
