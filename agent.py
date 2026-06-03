@@ -46,6 +46,7 @@ class AgentState(TypedDict):
     installer_revisions:   int
     codegen_revisions:     int
     executor_revisions:    int
+    skill_update_summary:  str    # summary written by skill_updater after the run
 
 # __ Pydantic Schemas __________________________________________________________
 
@@ -71,6 +72,15 @@ class CoderOutput(BaseModel):
 
 class InstallerOutput(BaseModel):
     dockerfile_content: str
+
+class SkillFileUpdate(BaseModel):
+    skill_name:      str   # e.g. "codegen", "parsl", "auto_update"
+    updated_content: str   # full new content of the SKILL.md file
+    reason:          str   # one-sentence explanation of what changed and why
+
+class SkillUpdaterOutput(BaseModel):
+    updates: list[SkillFileUpdate]
+    summary: str
 
 # __ Agent Prompts _____________________________________________________________
 
@@ -357,6 +367,31 @@ Now generate the workflow code based on the literature findings and tasks provid
 """
 
 EXECUTOR_PROMPT = "TODO"
+
+SKILL_UPDATER_PROMPT = """\
+You are a meta-learning agent responsible for improving AI skill files based on what just happened in a workflow run.
+
+You will be given:
+- A summary of the run: revision counts, exit code, orchestrator feedback, errors from execution output
+- The current content of each skill file that may need updating
+
+Your job is to return an updated version of any skill files that need improvement.
+
+RULES:
+1. Preserve all existing section numbers and headers - do not reorder or rename sections.
+2. Only add or modify content within sections - specifically the pitfalls table, code examples, and checklists.
+3. Be specific - new pitfall rows must include the exact error message pattern or a recognizable excerpt.
+4. No duplication - if a pitfall already exists, update it rather than adding a duplicate row.
+5. Only add things that actually happened in this run - do not invent pitfalls not evidenced in the state.
+6. Every addition must be a concrete rule or code example, not a vague observation.
+7. If no update is needed for a skill file, do not include it in the updates list.
+8. updated_content must be the COMPLETE new file content - not a diff, not a partial excerpt.
+9. Never modify Section 0 (ownership rules) of codegen/SKILL.md.
+
+Return ONLY a valid JSON object with exactly these keys:
+- updates: list of objects, each with skill_name (string), updated_content (string), reason (string)
+- summary: one short paragraph summarizing what was learned from this run and what changed\
+"""
 
 # __ Project layout (injected into codegen context) ____________________________
 
@@ -730,6 +765,104 @@ def executor(state: AgentState) -> dict:
         raise
 
 
+def skill_updater(state: AgentState) -> dict:
+    try:
+        console.print("\n[dim cyan][skill_updater] analyzing run history...[/dim cyan]")
+
+        repo_root   = os.path.dirname(os.path.abspath(__file__))
+        skills_root = os.path.join(repo_root, ".opencode", "skills")
+
+        def skill_path(name: str) -> str:
+            return os.path.join(skills_root, name, "SKILL.md")
+
+        def read_skill(name: str) -> str:
+            path = skill_path(name)
+            if os.path.isfile(path):
+                with open(path) as f:
+                    return f.read()
+            return ""
+
+        # ── build run summary ─────────────────────────────────────────────────
+        revisions = {
+            "planner":   state.get("planner_revisions",   0),
+            "installer": state.get("installer_revisions", 0),
+            "codegen":   state.get("codegen_revisions",   0),
+            "executor":  state.get("executor_revisions",  0),
+        }
+        execution_tail = ""
+        if state.get("execution_output"):
+            execution_tail = state["execution_output"][-1][:3000]
+
+        feedback = state.get("orchestrator_feedback", "")
+
+        exit_code_line = ""
+        for line in execution_tail.splitlines():
+            if "EXIT CODE" in line:
+                exit_code_line = line.strip()
+                break
+
+        run_summary = (
+            f"Revision counts: {revisions}\n"
+            f"Last orchestrator feedback: {feedback or '(none)'}\n"
+            f"Docker image tag: {state.get('image_tag', 'maw-sandbox:latest')}\n"
+            f"{exit_code_line}\n\n"
+            f"Execution output (truncated):\n{execution_tail}"
+        )
+
+        # ── read current skill files ──────────────────────────────────────────
+        skill_names = ["codegen", "parsl", "auto_update"]
+        skill_contents = {name: read_skill(name) for name in skill_names}
+
+        context = (
+            f"Run summary:\n{run_summary}\n\n" +
+            "\n\n".join(
+                f"=== Current content of {name}/SKILL.md ===\n{content}"
+                for name, content in skill_contents.items()
+                if content
+            )
+        )
+
+        # ── call LLM ─────────────────────────────────────────────────────────
+        result: SkillUpdaterOutput = _invoke_structured(model, SkillUpdaterOutput, [
+            SystemMessage(content=SKILL_UPDATER_PROMPT),
+            HumanMessage(content=context),
+        ])
+
+        # ── write updated skill files ─────────────────────────────────────────
+        for update in result.updates:
+            path = skill_path(update.skill_name)
+            if not os.path.isfile(path):
+                console.print(f"[yellow][skill_updater] skipping unknown skill: {update.skill_name}[/yellow]")
+                continue
+            with open(path, "w") as f:
+                f.write(update.updated_content)
+            console.print(
+                f"[dim cyan][skill_updater] updated {update.skill_name}/SKILL.md - {update.reason}[/dim cyan]"
+            )
+
+        if not result.updates:
+            console.print("[dim cyan][skill_updater] no skill files needed updating this run[/dim cyan]")
+
+        console.print(Panel(
+            result.summary,
+            title="[bold green]Skill Update Summary[/bold green]",
+            border_style="green",
+        ))
+
+        return {
+            "skill_update_summary": result.summary,
+            "current_step":         "skill_updater_complete",
+        }
+
+    except Exception as e:
+        console.print(f"[red][skill_updater] ERROR: {e}[/red]")
+        # non-fatal - don't crash the workflow if skill update fails
+        return {
+            "skill_update_summary": f"skill_updater failed: {e}",
+            "current_step":         "skill_updater_complete",
+        }
+
+
 # __ Graph _____________________________________________________________________
 
 def route_orchestrator(state: AgentState) -> str:
@@ -738,11 +871,12 @@ def route_orchestrator(state: AgentState) -> str:
 
 graph = StateGraph(AgentState)
 
-graph.add_node("orchestrator", orchestrator)
-graph.add_node("planner",      planner)
-graph.add_node("installer",    installer)
-graph.add_node("codegen",      codegen)
-graph.add_node("executor",     executor)
+graph.add_node("orchestrator",  orchestrator)
+graph.add_node("planner",       planner)
+graph.add_node("installer",     installer)
+graph.add_node("codegen",       codegen)
+graph.add_node("executor",      executor)
+graph.add_node("skill_updater", skill_updater)
 
 graph.set_entry_point("orchestrator")
 
@@ -751,13 +885,14 @@ graph.add_conditional_edges("orchestrator", route_orchestrator, {
     "installer": "installer",
     "codegen":   "codegen",
     "executor":  "executor",
-    "end":       END,
+    "end":       "skill_updater",   # always run skill_updater before END
 })
 
-graph.add_edge("planner",   "orchestrator")
-graph.add_edge("installer", "orchestrator")
-graph.add_edge("codegen",   "executor")
-graph.add_edge("executor",  "orchestrator")
+graph.add_edge("planner",       "orchestrator")
+graph.add_edge("installer",     "orchestrator")
+graph.add_edge("codegen",       "executor")
+graph.add_edge("executor",      "orchestrator")
+graph.add_edge("skill_updater", END)
 
 app = graph.compile()
 
@@ -835,6 +970,7 @@ if __name__ == "__main__":
         "installer_revisions":   0,
         "codegen_revisions":     0,
         "executor_revisions":    0,
+        "skill_update_summary":  "",
     }
 
     app.invoke(initial_state)
