@@ -150,10 +150,6 @@ Return ONLY a valid JSON object with exactly these keys:
 - next:               one of "planner", "installer", "codegen", "executor", "end"
 - feedback:           specific actionable criticism for the receiving agent, or empty string if proceeding normally
 - dockerfile_approved: true only when approving a pending Dockerfile, false in all other cases
-
-IMPORTANT: You cannot run code. Do not guess what will fail at runtime. Automatically send CodeGen's code to the executor and wait for output. 
-IMPORTANT: Let real execution output tell you what failed. Never route to the CodeGen agent if the last step came from the Code Gen agent. 
-RULE: ALWAYS ROUTE TO EXECUTOR AFTER THE CODE GEN AGENT!
 \
 """
 
@@ -209,8 +205,8 @@ The Dockerfile MUST:
 2. Set: ENV DEBIAN_FRONTEND=noninteractive
 3. Install system dependencies AND MPI libraries together:
    RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*
-4. CRITICAL — fix MPI shared library name immediately after. The lammps pip wheel was compiled against libmpi.so.12 but Ubuntu 22.04 ships a newer version with a different filename. This symlink is mandatory or LAMMPS will crash at runtime:
-   RUN ln -sf $(find /usr/lib -name "libmpi.so.*" | grep -v libmpi_cxx | sort | tail -1) /usr/lib/x86_64-linux-gnu/libmpi.so.12 && ldconfig
+4. CRITICAL — fix MPI shared library name immediately after. The lammps pip wheel was compiled against libmpi.so.12 but Ubuntu 22.04 ships a newer version with a different filename. This symlink is mandatory or LAMMPS will crash at runtime. Use a shell variable so the path is resolved dynamically and works on both x86_64 and ARM64:
+   RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v libmpi_cxx | sort | tail -1) && ln -sf "$MPI_SO" "$(dirname $MPI_SO)/libmpi.so.12" && ldconfig
 5. Upgrade pip: RUN pip3 install --upgrade pip
 6. Install LAMMPS via pip wheel: RUN pip3 install lammps
 7. Install all other pip-installable packages from the provided stack list
@@ -219,7 +215,7 @@ The Dockerfile MUST:
    ENV LIBGL_ALWAYS_SOFTWARE=1
    ENV PYOPENGL_PLATFORM=osmesa
    ENV OVITO_GUI_MODE=0
-   ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+   ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
 Rules:
 - Do NOT build LAMMPS from source
@@ -230,7 +226,7 @@ Rules:
 
 EXAMPLE OUTPUT:
 {
-  "dockerfile_content": "FROM ubuntu:22.04\\nENV DEBIAN_FRONTEND=noninteractive\\nRUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*\\nRUN ln -sf $(find /usr/lib -name \\"libmpi.so.*\\" | grep -v libmpi_cxx | sort | tail -1) /usr/lib/x86_64-linux-gnu/libmpi.so.12 && ldconfig\\nRUN pip3 install --upgrade pip\\nRUN pip3 install lammps\\nRUN pip3 install ovito\\nRUN pip3 install parsl\\nRUN pip3 install numpy\\nWORKDIR /app\\nENV LIBGL_ALWAYS_SOFTWARE=1\\nENV PYOPENGL_PLATFORM=osmesa\\nENV OVITO_GUI_MODE=0\\nENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH\\n"
+  "dockerfile_content": "FROM ubuntu:22.04\\nENV DEBIAN_FRONTEND=noninteractive\\nRUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*\\nRUN MPI_SO=$(find /usr/lib -name \\"libmpi.so.*\\" | grep -v libmpi_cxx | sort | tail -1) && ln -sf \\"$MPI_SO\\" \\"$(dirname $MPI_SO)/libmpi.so.12\\" && ldconfig\\nRUN pip3 install --upgrade pip\\nRUN pip3 install lammps\\nRUN pip3 install ovito\\nRUN pip3 install parsl\\nRUN pip3 install numpy\\nWORKDIR /app\\nENV LIBGL_ALWAYS_SOFTWARE=1\\nENV PYOPENGL_PLATFORM=osmesa\\nENV OVITO_GUI_MODE=0\\nENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH\\n"
 }
 
 ---
@@ -760,7 +756,7 @@ graph.add_conditional_edges("orchestrator", route_orchestrator, {
 
 graph.add_edge("planner",   "orchestrator")
 graph.add_edge("installer", "orchestrator")
-graph.add_edge("codegen",   "orchestrator")
+graph.add_edge("codegen",   "executor")
 graph.add_edge("executor",  "orchestrator")
 
 app = graph.compile()

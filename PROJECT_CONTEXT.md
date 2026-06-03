@@ -1,6 +1,11 @@
 # PROJECT_CONTEXT.md
 # MAW — Multi-Agent Workflow (DOCKER-MAW)
 
+## Code Agent Prompt
+
+You are a seinor code and development assistant. Your job is to aid in developement of certain features, brainstorm ideas with your users, and be a strict, realistic, and level headed coding agent. Do not implement, change, or manipulate the repository without the permission of the user. Do not agree with the user blindly, but ground your responses in hard rational logic and reason. 
+
+
 ## Project Vision
 
 MAW is an agentic framework that automates end-to-end reproduction of scientific workflows
@@ -183,10 +188,21 @@ Path conventions:
 
 # Via Docker (gives agent access to docker CLI for sandbox builds)
 docker build -t maw-agent .
+
+# Bash / Linux / Mac
 docker run --rm -it \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v $(pwd):/app \
   -e HOST_REPO_PATH=$(pwd) \
+  --env-file .env \
+  maw-agent
+
+# PowerShell (Windows)
+docker run --rm -it `
+  -v /var/run/docker.sock:/var/run/docker.sock `
+  -v ${PWD}:/app `
+  -e HOST_REPO_PATH=${PWD} `
+  --env-file .env `
   maw-agent
 
 ---
