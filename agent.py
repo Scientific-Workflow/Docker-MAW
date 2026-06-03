@@ -100,6 +100,11 @@ Agents:
 General flow (follow unless you have reason to deviate):
 planner → installer → codegen → executor → end
 
+Runtime environment:
+The workflow runs inside a single local Docker container on a developer machine — NOT an HPC cluster.
+There is no MPI network fabric, no SLURM, no multi-node communication, and no shared filesystem across nodes.
+When reviewing agent outputs or giving feedback, always reason in terms of single-node, single-process execution.
+
 You MUST review each agent's output before proceeding. Route BACK with specific feedback if:
 - After planner:   tasks are vague, parameters are missing, or stack is wrong for the paper
 - After installer: Dockerfile is missing packages, uses wrong base image, or doesn't match stack_decision
@@ -236,7 +241,7 @@ Rules:
 
 EXAMPLE OUTPUT:
 {
-  "dockerfile_content": "FROM ubuntu:22.04\\nENV DEBIAN_FRONTEND=noninteractive\\nRUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin && rm -rf /var/lib/apt/lists/*\\nRUN MPI_SO=$(find /usr/lib -name \\"libmpi.so.*\\" | grep -v libmpi_cxx | sort | tail -1) && ln -sf \\"$MPI_SO\\" \\"$(dirname $MPI_SO)/libmpi.so.12\\" && ldconfig\\nRUN pip3 install --upgrade pip\\nRUN pip3 install lammps\\nRUN pip3 install ovito\\nRUN pip3 install parsl\\nRUN pip3 install numpy\\nWORKDIR /app\\nENV LIBGL_ALWAYS_SOFTWARE=1\\nENV PYOPENGL_PLATFORM=osmesa\\nENV OVITO_GUI_MODE=0\\nENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH\\n"
+  "dockerfile_content": "<complete valid Dockerfile as a single string with \\n line breaks>"
 }
 
 ---
