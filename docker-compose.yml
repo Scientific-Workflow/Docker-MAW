@@ -1,0 +1,63 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: maw-agent:latest
+
+    # ── Environment ────────────────────────────────────────────────────────────
+    # Loads API keys and model config from .env in the repo root.
+    # Copy .env.example to .env and fill in your values before running.
+    env_file:
+      - .env
+
+    # HOST_REPO_PATH tells the agent where the repo lives on the HOST machine
+    # so that Docker bind mounts for the sandbox container resolve correctly.
+    #
+    # macOS / Linux / WSL2:  leave as-is — ${PWD} works automatically.
+    # Windows native CMD:    set HOST_REPO_PATH manually before running:
+    #                        set HOST_REPO_PATH=%cd% && docker compose up
+    # Windows PowerShell:    $env:HOST_REPO_PATH = (Get-Location).Path
+    environment:
+      - HOST_REPO_PATH=${HOST_REPO_PATH:-${PWD}}
+
+    # ── Docker socket ──────────────────────────────────────────────────────────
+    # The agent needs access to the host Docker daemon so it can build and run
+    # the sandbox container (maw-sandbox) during the installer and executor steps.
+    #
+    # macOS / Linux / WSL2: /var/run/docker.sock works out of the box.
+    # Windows Docker Desktop: the socket is exposed at the same path via
+    #                         the Docker Desktop WSL2 integration.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Mount the entire repo into the container at /app.
+      # This gives the agent access to:
+      #   /app/data/          — LAMMPS input files
+      #   /app/Literature/    — PDF papers
+      #   /app/builds/        — generated Dockerfile, workflow.py, run_workflow.sh
+      #   /app/work/          — simulation output (created at runtime)
+      - .:/app
+
+    working_dir: /app
+
+    # ── Default command ────────────────────────────────────────────────────────
+    # Runs the agent interactively (prompts for paper selection and goal).
+    # Override with --paper and --goal flags for non-interactive use:
+    #   docker compose run --rm agent --paper 1 --goal "Reproduce the workflow"
+    command: ["python", "agent.py"]
+
+    # ── Interactive mode ───────────────────────────────────────────────────────
+    # Required for the paper-selection and goal prompts when running interactively.
+    stdin_open: true
+    tty: true
+
+    # ── Resource limits (optional) ─────────────────────────────────────────────
+    # Uncomment to cap CPU and memory usage of the agent process.
+    # The sandbox container (maw-sandbox) has its own separate resource limits
+    # set by Docker Desktop / the host Docker daemon.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '2'
+    #       memory: 4G
