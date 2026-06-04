@@ -140,9 +140,14 @@ What to check in the Dockerfile:
 - All packages from stack_decision are present
 - Base image is ubuntu:24.04 (NOT 22.04 — 24.04 is required for OVITO ARM64 support)
 - LAMMPS installed via pip (not source build)
+- libopenmpi3 is present in the apt-get install list — this is REQUIRED and CORRECT.
+  The pip lammps wheel links against libmpi.so.12 at runtime. libopenmpi3 provides
+  ONLY the shared library file, not mpirun or mpiexec. LAMMPS still runs in serial mode.
+  Do NOT reject a Dockerfile for including libopenmpi3.
 - pip install commands use --break-system-packages flag (required on Ubuntu 24.04)
 - ENV, RUN, and WORKDIR instructions are all present and correct
 - No conda, no mamba
+- No openmpi-bin, no mpirun, no mpiexec, no mpi4py (these are NOT needed and NOT allowed)
 
 In all situations other than approving a pending Dockerfile, set dockerfile_approved=false.
 
@@ -218,13 +223,15 @@ The Dockerfile MUST:
    REASON: Ubuntu 24.04 ships glibc 2.39 and Python 3.12, both required by the OVITO ARM64 wheel.
    Do NOT use ubuntu:22.04 — it has glibc 2.35 and Python 3.10, which are incompatible with OVITO on ARM64.
 2. Set: ENV DEBIAN_FRONTEND=noninteractive
-3. Install system dependencies (no MPI libraries):
-   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6-dev libgl1-mesa-glx libglib2.0-0 && rm -rf /var/lib/apt/lists/*
-4. Upgrade pip: RUN pip3 install --upgrade pip
-5. Install LAMMPS via pip wheel: RUN pip3 install lammps
-6. Install OVITO — use the OVITO pip index for ARM64/x86_64 compatibility:
-   RUN pip3 install ovito --extra-index-url https://pypi.ovito.org/
-7. Install all other pip-installable packages from the provided stack list
+3. Install system dependencies INCLUDING the OpenMPI runtime shared library:
+   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6-dev libgl1-mesa-glx libglib2.0-0 libopenmpi3 && rm -rf /var/lib/apt/lists/*
+   IMPORTANT: libopenmpi3 provides ONLY the shared library (.so file) that the pip lammps wheel links against at runtime.
+   It does NOT install mpirun or mpiexec. LAMMPS still runs in serial mode via the Python API — not via mpirun.
+   Without libopenmpi3, the pip lammps wheel will crash with "libmpi.so.12: cannot open shared object file".
+4. Upgrade pip: RUN pip3 install --upgrade pip --break-system-packages
+5. Install LAMMPS via pip wheel: RUN pip3 install lammps --break-system-packages
+6. Install OVITO: RUN pip3 install ovito --break-system-packages
+7. Install all other pip-installable packages from the provided stack list, each with --break-system-packages
 8. Set working directory: WORKDIR /app
 9. Set headless rendering env vars:
    ENV LIBGL_ALWAYS_SOFTWARE=1
@@ -233,10 +240,10 @@ The Dockerfile MUST:
    ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
 Rules:
-- Do NOT install OpenMPI, MPICH, mpi4py, libopenmpi-dev, libmpich-dev, or any MPI libraries — LAMMPS runs via the Python API in serial mode, no MPI needed
+- ALWAYS install libopenmpi3 in the apt-get step — the pip lammps wheel requires it as a runtime dependency
+- Do NOT install openmpi-bin, mpirun, mpiexec, libopenmpi-dev, libmpich-dev, or mpi4py
 - Do NOT build LAMMPS from source
 - Do NOT use conda or mamba
-- Do NOT skip the libmpi.so.12 symlink — LAMMPS will fail at runtime without it
 - Always use --break-system-packages on every pip3 install — Ubuntu 24.04 requires it
 - Do NOT include markdown code fences or any text outside the JSON
 - Return ONLY a valid JSON object
@@ -665,32 +672,29 @@ def installer(state: AgentState) -> dict:
                 )),
             ])
 
-            # ── Post-process: enforce platform-safe base image and OVITO install ──
-            # The LLM sometimes ignores the ubuntu:24.04 instruction and uses 22.04,
-            # which breaks OVITO on ARM64 (requires glibc 2.39 / Python 3.12+).
-            # We correct this deterministically rather than relying on LLM compliance.
+            # ── Post-process: enforce platform-safe base image and pip flags ────
             import re as _re
             dockerfile = result.dockerfile_content
 
             # 1. Force base image to ubuntu:24.04
             dockerfile = _re.sub(r'FROM\s+ubuntu:\S+', 'FROM ubuntu:24.04', dockerfile)
 
-            # 2. Fix any bare `pip3 install ovito` to add --break-system-packages
-            #    (required on Ubuntu 24.04 due to PEP 668 enforcement)
-            dockerfile = _re.sub(
-                r'(pip3\s+install\b(?:\s+--[^\s]+)*\s+ovito(?:[^\n]*))(?<!\-\-break\-system\-packages)',
-                lambda m: m.group(0) if '--break-system-packages' in m.group(0) else m.group(0) + ' --break-system-packages',
-                dockerfile,
-            )
+            # 2. Clean up any duplicate or malformed --break-system-package(s) flags
+            #    The LLM sometimes generates "--break-system-package --break-system-packagess"
+            #    Normalise every pip3 install line: remove all variants then add one clean copy.
+            def fix_pip_line(line: str) -> str:
+                if 'pip3' not in line and 'pip ' not in line:
+                    return line
+                # Strip all variations of the flag (including typos)
+                cleaned = _re.sub(r'\s+--break-system-package[s]*', '', line)
+                # Re-add exactly once if it was a pip install line (not pip --version etc.)
+                if _re.search(r'pip3?\s+install\b', cleaned):
+                    cleaned = cleaned.rstrip() + ' --break-system-packages'
+                return cleaned
 
-            # 3. Add --break-system-packages to all other pip3 install lines on 24.04
-            dockerfile = _re.sub(
-                r'(pip3\s+install\b(?:\s+--[^\s]+)*\s+(?!--)[^\n]+?)(\n)',
-                lambda m: m.group(0) if '--break-system-packages' in m.group(0) else m.group(1) + ' --break-system-packages\n',
-                dockerfile,
-            )
+            dockerfile = '\n'.join(fix_pip_line(l) for l in dockerfile.splitlines())
 
-            console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages[/dim cyan]")
+            console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages normalised[/dim cyan]")
 
             with open(dockerfile_path, "w") as f:
                 f.write(dockerfile)
