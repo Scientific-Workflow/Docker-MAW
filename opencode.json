@@ -6,7 +6,7 @@
             "name": "Argo",
             "options": {
                 "baseURL": "https://apps-dev.inside.anl.gov/argoapi/v1",
-                "apiKey": "jacob.oh"
+                "apiKey": "xswenson"
             },
             "models": {
                 "gpt52": {
