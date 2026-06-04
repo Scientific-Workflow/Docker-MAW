@@ -17,4 +17,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "agent.py", "--paper", "1", "--goal", "Recreate this workflow using the data in the data directory and LAMMPs, Parsl, and OVITO."]
+CMD ["python", "agent.py", "--paper", "1", "--goal", "Recreate this workflow using the data in the data directory and LAMMPs, Parsl, and OVITO. This is not an HPC environment. Do not use any HPC runtime tools. This is running locally on one machine."]

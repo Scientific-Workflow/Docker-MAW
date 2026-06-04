@@ -1,7 +1,9 @@
 import os
+import json
 import operator
 import subprocess
 import warnings
+from datetime import datetime
 from typing import Annotated, Literal, Sequence
 from typing_extensions import TypedDict
 from pydantic import BaseModel
@@ -18,6 +20,8 @@ from langgraph.graph.message import add_messages
 load_dotenv()
 
 console = Console()
+
+_run_log_path: str = ""
 
 
 # __ LLM _______________________________________________________________________
@@ -104,33 +108,22 @@ Runtime environment:
 The workflow runs inside a single local Docker container on a developer machine — NOT an HPC cluster.
 There is no MPI network fabric, no SLURM, no multi-node communication, and no shared filesystem across nodes.
 When reviewing agent outputs or giving feedback, always reason in terms of single-node, single-process execution.
+LAMMPS runs via the Python API (from lammps import lammps) in serial mode — do NOT recommend mpirun, openmpi, mpich, or any MPI packages to the installer. MPI is not needed and will cause crashes in this environment.
 
 You MUST review each agent's output before proceeding. Route BACK with specific feedback if:
 - After planner:   tasks are vague, parameters are missing, or stack is wrong for the paper
 - After installer: Dockerfile is missing packages, uses wrong base image, or doesn't match stack_decision
 - After codegen:   code is structurally incomplete (missing functions, missing main(), no files generated). Do NOT invent runtime errors — you cannot execute code. If the code looks complete and plausible, route to executor immediately.
-- After executor:  execution failed — route back to codegen with the EXACT error text from execution_output. Never fabricate errors.
-
-
-IMPORTANT — executor platform skip:
-If execution_output starts with "SKIPPED (no docker)", it means Docker is not available on this machine.
-This is NOT a failure. The code and Dockerfile have been generated correctly and will be executed where
-Docker is available. In this case you MUST route to "end".
-Do NOT route back to executor or any other agent when you see this skip message.
+- After executor: execution failed
+    → If stderr contains "ModuleNotFoundError: No module named" or "ImportError: No module named",
+      route to installer with the exact missing package name in the feedback field.
+    → For ALL other failures (LAMMPS errors, Parsl errors, logic errors, segfaults, wrong output,
+      file not found), route to codegen with the full stderr. LAMMPS runtime errors are code errors,
+      not missing packages.
 
 When routing back, always provide specific, actionable feedback in the feedback field.
 When proceeding forward normally, set feedback to empty string.
 When execution succeeds, route to "end".
-
-Few Shot Examples of Re-Routing:
-    Scenario 1:
-        - The executor while running the code generator's code, you identify from the returned stderr output that there is a logical error within the task code.
-          Your next action would then be to send the raw output from the executor back to the code generator node to debug and fix the errors.
-    Scenario 2:
-        - The executor while running the code generator's code, you identify from the returned stderr output that there is a package that is not installed. Your next action would
-          be to route back to the installer node and pass in instructions to edit the associated Dockerfile to include the missing package.
-
-The examples above are simply examples, DO NOT limit re-routing to only these scenarios.
 
 TWO-PHASE INSTALLER REVIEW:
 The installer works in two phases and requires your explicit sign-off between them:
@@ -171,6 +164,8 @@ Return ONLY a valid JSON object with exactly these keys:
 PLANNER_PROMPT = """\
 You are a scientific workflow analyst. You will be given the full text of a research paper and a goal.
 
+Runtime environment: The workflow runs inside a single local Docker container on a developer machine — NOT an HPC cluster. There is no SLURM, no MPI across nodes, no job scheduler, and no HPC infrastructure. Recommend only tools and packages that run in a single process inside a Docker container. Do NOT recommend MPI, mpirun, OpenMPI, MPICH, mpi4py, SLURM, PBS, or any HPC-specific parallelism tools.
+
 Extract everything needed to reproduce the computational workflow described in the paper and return it as a JSON object with exactly these three keys:
 - literature_findings: list of strings — key methods, parameters, and scientific context needed to reproduce the workflow
 - stack_decision: list of strings — all required software and Python packages with versions where known
@@ -210,12 +205,9 @@ Now apply this same structure and level of detail to the paper and goal provided
 """
 
 INSTALLER_PROMPT = """\
-You are an HPC environment specialist. Given a list of required software packages and scientific workflow context, generate a valid Dockerfile that installs all dependencies into an Ubuntu 24.04 container.
+You are a Docker environment specialist. Given a list of required software packages and scientific workflow context, generate a valid Dockerfile that installs all dependencies into an Ubuntu 22.04 container.
 
-This Dockerfile must work on all three platforms without modification:
-- macOS (Apple Silicon / ARM64) running Docker Desktop
-- Windows running Docker Desktop (x86_64 or ARM64)
-- Linux HPC (x86_64)
+Runtime environment: This container runs on a single developer machine NOT an HPC cluster. There is no MPI network fabric, no SLURM, and no multi-node communication. Prefer single-node, serial-friendly package configurations. Avoid HPC-specific MPI setups unless strictly required by the workflow.
 
 Return a JSON object with exactly one key:
 - dockerfile_content: string — the complete, valid Dockerfile
@@ -225,25 +217,22 @@ The Dockerfile MUST:
    REASON: Ubuntu 24.04 ships glibc 2.39 and Python 3.12, both required by the OVITO ARM64 wheel.
    Do NOT use ubuntu:22.04 — it has glibc 2.35 and Python 3.10, which are incompatible with OVITO on ARM64.
 2. Set: ENV DEBIAN_FRONTEND=noninteractive
-3. Install system dependencies AND MPI libraries together:
-   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libopenmpi-dev openmpi-bin libosmesa6 && rm -rf /var/lib/apt/lists/*
-4. CRITICAL — fix MPI shared library name immediately after. The lammps pip wheel was compiled against libmpi.so.12 but Ubuntu 24.04 ships a newer version with a different filename. This symlink is mandatory or LAMMPS will crash at runtime. Use a shell variable so the path is resolved dynamically and works on both x86_64 and ARM64:
-   RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v libmpi_cxx | sort | tail -1) && ln -sf "$MPI_SO" "$(dirname $MPI_SO)/libmpi.so.12" && ldconfig
-5. Upgrade pip: RUN pip3 install --upgrade pip
-6. Install LAMMPS via pip wheel: RUN pip3 install lammps
-7. Install OVITO — CRITICAL: standard PyPI has no ARM64 Linux wheel. You MUST use the break-system-packages flag since Ubuntu 24.04 enforces PEP 668:
-   RUN pip3 install ovito --break-system-packages
-8. Install parsl and numpy with break-system-packages:
-   RUN pip3 install "parsl>=2024.0.0" numpy --break-system-packages
-9. Install any other packages from the stack list the same way (--break-system-packages)
-10. Set working directory: WORKDIR /app
-11. Set headless rendering env vars for OVITO (required on all platforms for non-GUI rendering):
-    ENV LIBGL_ALWAYS_SOFTWARE=1
-    ENV PYOPENGL_PLATFORM=osmesa
-    ENV OVITO_GUI_MODE=0
+3. Install system dependencies (no MPI libraries):
+   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6-dev libgl1-mesa-glx libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+4. Upgrade pip: RUN pip3 install --upgrade pip
+5. Install LAMMPS via pip wheel: RUN pip3 install lammps
+6. Install OVITO — use the OVITO pip index for ARM64/x86_64 compatibility:
+   RUN pip3 install ovito --extra-index-url https://pypi.ovito.org/
+7. Install all other pip-installable packages from the provided stack list
+8. Set working directory: WORKDIR /app
+9. Set headless rendering env vars:
+   ENV LIBGL_ALWAYS_SOFTWARE=1
+   ENV PYOPENGL_PLATFORM=osmesa
+   ENV OVITO_GUI_MODE=0
+   ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
 Rules:
-- Do NOT use ubuntu:22.04 — use ubuntu:24.04
+- Do NOT install OpenMPI, MPICH, mpi4py, libopenmpi-dev, libmpich-dev, or any MPI libraries — LAMMPS runs via the Python API in serial mode, no MPI needed
 - Do NOT build LAMMPS from source
 - Do NOT use conda or mamba
 - Do NOT skip the libmpi.so.12 symlink — LAMMPS will fail at runtime without it
@@ -269,7 +258,7 @@ Now apply this same structure to the stack and findings provided.\
 """
 
 CODEGEN_PROMPT = """\
-You are an HPC scientific workflow code generator. Your job is to write Python code that uses Parsl to orchestrate a LAMMPS molecular dynamics simulation followed by OVITO structural analysis, targeting a Linux HPC environment running inside a Docker container.
+You are a scientific workflow code generator. Your job is to write Python code that uses Parsl to orchestrate a LAMMPS molecular dynamics simulation followed by OVITO structural analysis, running inside a local Docker container on a developer machine — NOT an HPC cluster. There is no SLURM, no MPI across nodes, and no HPC job scheduler. Use single-node, single-process configurations only.
 
 You will be given:
 - A list of literature findings (methods, parameters, scientific context)
@@ -453,15 +442,24 @@ HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspat
 
 # __ Structured output helper __________________________________________________
 
-def _invoke_structured(llm, schema, messages):
+def _invoke_structured(llm, schema, messages, retries=5):
     """Call llm and parse the response as schema, tolerating preamble text before the JSON block."""
     import json as _json, re as _re
-    response = llm.invoke(messages)
-    text = response.content if hasattr(response, "content") else str(response)
-    match = _re.search(r'\{.*\}', text, _re.DOTALL)
-    if not match:
-        raise ValueError(f"No JSON object found in model response:\n{text[:500]}")
-    return schema.model_validate(_json.loads(match.group(0)))
+    last_err = None
+    for attempt in range(retries):
+        response = llm.invoke(messages)
+        text = response.content if hasattr(response, "content") else str(response)
+        match = _re.search(r'\{.*\}', text, _re.DOTALL)
+        if not match:
+            last_err = ValueError(f"No JSON object found in model response:\n{text[:500]}")
+            console.print(f"[yellow][_invoke_structured] attempt {attempt+1}: no JSON found, retrying...[/yellow]")
+            continue
+        try:
+            return schema.model_validate(_json.loads(match.group(0)))
+        except (_json.JSONDecodeError, Exception) as e:
+            last_err = e
+            console.print(f"[yellow][_invoke_structured] attempt {attempt+1}: parse error ({e}), retrying...[/yellow]")
+    raise last_err
 
 # __ Nodes _____________________________________________________________________
 
@@ -491,7 +489,7 @@ def orchestrator(state: AgentState) -> dict:
         parts.append(f"Dockerfile:\n{state['dockerfile']}")
     if state.get("code_output"):
         parts.append(f"Code output (latest):\n{state['code_output'][-1]}")
-    if state.get("execution_output"):
+    if state.get("execution_output") and state.get("current_step") != "installer_dockerfile_pending_approval":
         parts.append(f"Execution output (latest):\n{state['execution_output'][-1]}")
 
     result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
@@ -499,10 +497,27 @@ def orchestrator(state: AgentState) -> dict:
         HumanMessage(content="\n\n".join(parts)),
     ])
 
+    # Hard overrides: lock routing at deterministic transition points
+    if state.get("current_step") == "installer_dockerfile_pending_approval":
+        result.next = "installer"
+    elif state.get("current_step") == "installer_complete":
+        result.next = "codegen"
+
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
         panel_body += f"\n\n[bold]Feedback to {result.next}:[/bold]\n[yellow]{result.feedback}[/yellow]"
     console.print(Panel(panel_body, title="[bold cyan]Orchestrator Decision[/bold cyan]", border_style="cyan"))
+
+    if _run_log_path:
+        with open(_run_log_path, "a") as _lf:
+            _lf.write(json.dumps({
+                "ts":         datetime.now().isoformat(),
+                "from_step":  state.get("current_step"),
+                "routing_to": result.next,
+                "revisions":  revisions,
+                "feedback":   result.feedback,
+                "reasoning":  result.reasoning[:500],
+            }) + "\n")
 
     already_ran = {
         "planner":   bool(state.get("literature_findings")),
@@ -575,7 +590,7 @@ def installer(state: AgentState) -> dict:
 
         if state.get("dockerfile_approved"):
             # ── Phase 2: Dockerfile approved — build the image ───────────────
-            import shutil
+            import shutil, hashlib
             docker_available = shutil.which("docker") is not None
 
             if not docker_available:
@@ -589,16 +604,42 @@ def installer(state: AgentState) -> dict:
                     "current_step": "installer_complete",
                 }
 
+            # ── skip rebuild if Dockerfile unchanged and image already exists ─
+            hash_file = os.path.join(build_dir, ".dockerfile_hash")
+            with open(dockerfile_path) as f:
+                current_content = f.read()
+            current_hash = hashlib.md5(current_content.encode()).hexdigest()
+
+            image_exists = subprocess.run(
+                ["docker", "inspect", image_tag], capture_output=True,
+            ).returncode == 0
+
+            stored_hash = ""
+            if os.path.isfile(hash_file):
+                with open(hash_file) as f:
+                    stored_hash = f.read().strip()
+
+            if current_hash == stored_hash and image_exists:
+                console.print("[dim cyan][installer] Dockerfile unchanged and image exists — skipping rebuild[/dim cyan]")
+                return {
+                    "image_tag":    image_tag,
+                    "current_step": "installer_complete",
+                }
+
             console.print("[dim cyan][installer] Dockerfile approved — building Docker image (this may take several minutes)...[/dim cyan]")
 
             build_context = os.path.dirname(os.path.abspath(__file__))
             proc = subprocess.run(
                 ["docker", "build", "-t", image_tag, "-f", dockerfile_path, build_context],
+                capture_output=True, text=True,
                 timeout=1800,
             )
 
             if proc.returncode != 0:
-                raise RuntimeError(f"docker build failed (exit {proc.returncode})")
+                raise RuntimeError(f"docker build failed (exit {proc.returncode}):\n{proc.stderr[-3000:]}")
+
+            with open(hash_file, "w") as f:
+                f.write(current_hash)
 
             console.print(f"[dim cyan][installer] image built: {image_tag}[/dim cyan]")
             return {
@@ -994,6 +1035,11 @@ if __name__ == "__main__":
     if not goal:
         console.print("[red]Goal cannot be empty.[/red]")
         raise SystemExit(1)
+
+    runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    _run_log_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl")
+    console.print(f"[dim]Run log: {_run_log_path}[/dim]")
 
     initial_state = {
         "messages":              [],
