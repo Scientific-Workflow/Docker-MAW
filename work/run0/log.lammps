@@ -1,0 +1,188 @@
+LAMMPS (2 Aug 2023 - Update 3)
+# LAMMPS input script
+
+variable seed equal 7545
+
+boundary p p p
+units       metal
+atom_style  atomic
+atom_modify map array sort 0 0
+read_data data.init
+Reading data file ...
+  orthogonal box = (-24.754513 -25.01821 -24.354031) to (23.945349 47.534645 24.345829)
+  1 by 1 by 1 MPI processor grid
+  reading atoms ...
+  4360 atoms
+  read_data CPU = 0.015 seconds
+pair_style tersoff
+pair_coeff  * *  AW.tersoff AW
+
+# ----- Variables -----
+variable T equal 180
+variable P equal 1.0
+variable Nrestart equal 100
+
+# ----- Initialize -----
+velocity  all create ${T} ${seed}
+velocity  all create 180 ${seed}
+velocity  all create 180 7545
+neighbor 2.0 nsq
+neigh_modify delay 0 every 1 check yes
+fix rmMomentum all  momentum 1 linear 1 1 1
+
+# ----- Computes -----
+compute msd all  msd com yes
+
+# ----- Log -----
+thermo        ${Nrestart}
+thermo        100
+thermo_style custom step atoms pe ke temp press density lx ly lz etotal enthalpy c_msd[4]
+thermo_modify line multi norm yes flush yes format float %.8g
+
+# ----- Minimize -----
+
+minimize 1e-4 1e-6 1000 10000
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 5.5800099
+  ghost atom cutoff = 5.5800099
+  1 neighbor lists, perpetual/occasional/extra = 1 0 0
+  (1) pair tersoff, perpetual
+      attributes: full, newton on
+      pair build: full/nsq
+      stencil: none
+      bin: none
+Per MPI rank memory allocation (min/avg/max) = 4.914 | 4.914 | 4.914 Mbytes
+------------ Step              0 ----- CPU =            0 (sec) -------------
+Step     =              0 Atoms    =           4360 PotEng   = -0.51097616 
+KinEng   = 0.02326149 Temp     = 180 Press    = 3599.2458 
+Density  = 0.7579955 Lx       = 48.699861 Ly       = 72.552855 
+Lz       = 48.69986 TotEng   = -0.48771467 Enthalpy = -0.39905531 
+c_msd[4] = 0
+------------ Step             32 ----- CPU =    0.3782852 (sec) -------------
+Step     =             32 Atoms    =           4360 PotEng   = -0.56751804 
+KinEng   = 0.02326149 Temp     = 180 Press    = 363.46085 
+Density  = 0.7579955 Lx       = 48.699861 Ly       = 72.552855 
+Lz       = 48.69986 TotEng   = -0.54425655 Enthalpy = -0.53530351 
+c_msd[4] = 0.069154628
+Loop time of 0.378482 on 1 procs for 32 steps with 4360 atoms
+
+99.6% CPU use with 1 MPI tasks x no OpenMP threads
+
+Minimization stats:
+  Stopping criterion = energy tolerance
+  Energy initial, next-to-last, final = 
+    -0.510976162691838 -0.567473892932518 -0.567518041597411
+  Force two-norm initial, final = 390.96334 1.1943823
+  Force max component initial, final = 188.15372 0.24276188
+  Final line search alpha, max atom move = 0.20055246 0.048686491
+  Iterations, force evaluations = 32 36
+
+MPI task timing breakdown:
+Section |  min time  |  avg time  |  max time  |%varavg| %total
+---------------------------------------------------------------
+Pair    | 0.29708    | 0.29708    | 0.29708    |   0.0 | 78.49
+Neigh   | 0.076461   | 0.076461   | 0.076461   |   0.0 | 20.20
+Comm    | 0.00075    | 0.00075    | 0.00075    |   0.0 |  0.20
+Output  | 0          | 0          | 0          |   0.0 |  0.00
+Modify  | 0          | 0          | 0          |   0.0 |  0.00
+Other   |            | 0.00419    |            |       |  1.11
+
+Nlocal:           4360 ave        4360 max        4360 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:           2689 ave        2689 max        2689 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:              0 ave           0 max           0 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+FullNghs:       102282 ave      102282 max      102282 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 102282
+Ave neighs/atom = 23.459174
+Neighbor list builds = 2
+Dangerous builds = 0
+min_style cg
+
+dump positions all   custom ${Nrestart} frames/step.*.lammpstrj id type x y z vx vy vz
+dump positions all   custom 100 frames/step.*.lammpstrj id type x y z vx vy vz
+
+timestep 0.01
+fix integrate all      npt temp ${T} ${T} 0.5 iso ${P} ${P} 5
+fix integrate all      npt temp 180 ${T} 0.5 iso ${P} ${P} 5
+fix integrate all      npt temp 180 180 0.5 iso ${P} ${P} 5
+fix integrate all      npt temp 180 180 0.5 iso 1 ${P} 5
+fix integrate all      npt temp 180 180 0.5 iso 1 1 5
+run 500
+Per MPI rank memory allocation (min/avg/max) = 3.789 | 3.789 | 3.789 Mbytes
+------------ Step             32 ----- CPU =            0 (sec) -------------
+Step     =             32 Atoms    =           4360 PotEng   = -0.56751804 
+KinEng   = 0.02326149 Temp     = 180 Press    = 363.46085 
+Density  = 0.7579955 Lx       = 48.699861 Ly       = 72.552855 
+Lz       = 48.69986 TotEng   = -0.54425655 Enthalpy = -0.53530351 
+c_msd[4] = 0.069154628
+------------ Step            100 ----- CPU =    0.8943285 (sec) -------------
+Step     =            100 Atoms    =           4360 PotEng   = -0.55605197 
+KinEng   = 0.015025013 Temp     = 116.26523 Press    = -305.88464 
+Density  = 0.75146446 Lx       = 48.84054 Ly       = 72.762436 
+Lz       = 48.840538 TotEng   = -0.54102696 Enthalpy = -0.54862723 
+c_msd[4] = 0.2654074
+------------ Step            200 ----- CPU =     1.969611 (sec) -------------
+Step     =            200 Atoms    =           4360 PotEng   = -0.55377146 
+KinEng   = 0.019270265 Temp     = 149.11546 Press    = 28.650279 
+Density  = 0.75238071 Lx       = 48.820705 Ly       = 72.732887 
+Lz       = 48.820704 TotEng   = -0.53450119 Enthalpy = -0.53379019 
+c_msd[4] = 0.54732009
+------------ Step            300 ----- CPU =     3.113236 (sec) -------------
+Step     =            300 Atoms    =           4360 PotEng   = -0.55079097 
+KinEng   = 0.022558785 Temp     = 174.56239 Press    = 253.32276 
+Density  = 0.75506178 Lx       = 48.762853 Ly       = 72.646699 
+Lz       = 48.762851 TotEng   = -0.52823219 Enthalpy = -0.5219679 
+c_msd[4] = 0.7204383
+------------ Step            400 ----- CPU =     4.429468 (sec) -------------
+Step     =            400 Atoms    =           4360 PotEng   = -0.54930888 
+KinEng   = 0.023989975 Temp     = 185.6371 Press    = 10.076035 
+Density  = 0.75752237 Lx       = 48.709998 Ly       = 72.567956 
+Lz       = 48.709996 TotEng   = -0.5253189 Enthalpy = -0.52507055 
+c_msd[4] = 0.95372292
+------------ Step            500 ----- CPU =     5.594168 (sec) -------------
+Step     =            500 Atoms    =           4360 PotEng   = -0.55110945 
+KinEng   = 0.023140634 Temp     = 179.06481 Press    = -100.02956 
+Density  = 0.75693945 Lx       = 48.722499 Ly       = 72.58658 
+Lz       = 48.722497 TotEng   = -0.52796882 Enthalpy = -0.53043626 
+c_msd[4] = 1.2019998
+------------ Step            532 ----- CPU =     5.975296 (sec) -------------
+Step     =            532 Atoms    =           4360 PotEng   = -0.55155831 
+KinEng   = 0.022995449 Temp     = 177.94135 Press    = -245.71899 
+Density  = 0.75756951 Lx       = 48.708988 Ly       = 72.566451 
+Lz       = 48.708986 TotEng   = -0.52856286 Enthalpy = -0.534619 
+c_msd[4] = 1.2274768
+Loop time of 5.97548 on 1 procs for 500 steps with 4360 atoms
+
+Performance: 72.296 ns/day, 0.332 hours/ns, 83.675 timesteps/s, 364.825 katom-step/s
+99.6% CPU use with 1 MPI tasks x no OpenMP threads
+
+MPI task timing breakdown:
+Section |  min time  |  avg time  |  max time  |%varavg| %total
+---------------------------------------------------------------
+Pair    | 4.1098     | 4.1098     | 4.1098     |   0.0 | 68.78
+Neigh   | 1.747      | 1.747      | 1.747      |   0.0 | 29.24
+Comm    | 0.010635   | 0.010635   | 0.010635   |   0.0 |  0.18
+Output  | 0.033653   | 0.033653   | 0.033653   |   0.0 |  0.56
+Modify  | 0.06913    | 0.06913    | 0.06913    |   0.0 |  1.16
+Other   |            | 0.005218   |            |       |  0.09
+
+Nlocal:           4360 ave        4360 max        4360 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:           2732 ave        2732 max        2732 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:              0 ave           0 max           0 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+FullNghs:       101212 ave      101212 max      101212 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 101212
+Ave neighs/atom = 23.213761
+Neighbor list builds = 43
+Dangerous builds = 0
+Total wall time: 0:00:06
