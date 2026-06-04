@@ -705,6 +705,31 @@ def installer(state: AgentState) -> dict:
                 if l is not None
             )
 
+            # 3. Inject libmpi.so.12 symlink after libopenmpi3 install.
+            #    The pip lammps wheel is compiled against libmpi.so.12, but
+            #    Ubuntu 24.04 ships libmpi.so.40 via libopenmpi3. We create
+            #    a symlink deterministically so LAMMPS can load at runtime.
+            #    This is injected in code — not left to the LLM — so it is
+            #    always present regardless of what the LLM generates.
+            MPI_SYMLINK = (
+                'RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v cxx | sort | tail -1) && '
+                'MPI_DIR=$(dirname "$MPI_SO") && '
+                'ln -sf "$MPI_SO" "$MPI_DIR/libmpi.so.12" && '
+                'ldconfig'
+            )
+            if 'libmpi.so.12' not in dockerfile:
+                # Insert just before WORKDIR, or append before ENV block
+                if 'WORKDIR' in dockerfile:
+                    dockerfile = dockerfile.replace(
+                        'WORKDIR',
+                        MPI_SYMLINK + '\n\nWORKDIR',
+                        1,
+                    )
+                else:
+                    dockerfile = dockerfile + '\n' + MPI_SYMLINK + '\n'
+                console.print("[dim cyan][installer] injected libmpi.so.12 symlink into Dockerfile[/dim cyan]")
+
+
             console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages normalised[/dim cyan]")
 
             with open(dockerfile_path, "w") as f:
