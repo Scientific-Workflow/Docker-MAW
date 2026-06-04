@@ -224,7 +224,8 @@ The Dockerfile MUST:
    Do NOT use ubuntu:22.04 — it has glibc 2.35 and Python 3.10, which are incompatible with OVITO on ARM64.
 2. Set: ENV DEBIAN_FRONTEND=noninteractive
 3. Install system dependencies INCLUDING the OpenMPI runtime shared library:
-   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6-dev libgl1-mesa-glx libglib2.0-0 libopenmpi3 && rm -rf /var/lib/apt/lists/*
+   RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6 libgl1 libglib2.0-0 libopenmpi3 && rm -rf /var/lib/apt/lists/*
+   NOTE: Ubuntu 24.04 renamed libgl1-mesa-glx to libgl1 and libosmesa6-dev to libosmesa6. Always use libgl1 and libosmesa6 — NOT libgl1-mesa-glx or libosmesa6-dev.
    IMPORTANT: libopenmpi3 provides ONLY the shared library (.so file) that the pip lammps wheel links against at runtime.
    It does NOT install mpirun or mpiexec. LAMMPS still runs in serial mode via the Python API — not via mpirun.
    Without libopenmpi3, the pip lammps wheel will crash with "libmpi.so.12: cannot open shared object file".
