@@ -138,8 +138,9 @@ When current_step is "installer_dockerfile_pending_approval", you MUST review do
 
 What to check in the Dockerfile:
 - All packages from stack_decision are present
-- Base image is ubuntu:22.04
+- Base image is ubuntu:24.04 (NOT 22.04 — 24.04 is required for OVITO ARM64 support)
 - LAMMPS installed via pip (not source build)
+- pip install commands use --break-system-packages flag (required on Ubuntu 24.04)
 - ENV, RUN, and WORKDIR instructions are all present and correct
 - No conda, no mamba
 
@@ -630,7 +631,7 @@ def installer(state: AgentState) -> dict:
 
             build_context = os.path.dirname(os.path.abspath(__file__))
             proc = subprocess.run(
-                ["docker", "build", "-t", image_tag, "-f", dockerfile_path, build_context],
+                ["docker", "build", "--network=host", "-t", image_tag, "-f", dockerfile_path, build_context],
                 capture_output=True, text=True,
                 timeout=1800,
             )
