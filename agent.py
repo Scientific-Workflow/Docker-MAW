@@ -686,14 +686,24 @@ def installer(state: AgentState) -> dict:
             def fix_pip_line(line: str) -> str:
                 if 'pip3' not in line and 'pip ' not in line:
                     return line
-                # Strip all variations of the flag (including typos)
+                # Remove the "upgrade pip" line entirely — on Ubuntu 24.04 it
+                # fails because Debian's pip has no RECORD file and can't be
+                # uninstalled. pip 24.0 ships with the image and is sufficient.
+                if _re.search(r'pip3?\s+install\b.*--upgrade\s+pip\b', line):
+                    return ''
+                if _re.search(r'pip3?\s+install\b.*\bupgrade\b.*\bpip\b', line):
+                    return ''
+                # Strip all variations of the --break-system-packages flag (including typos)
                 cleaned = _re.sub(r'\s+--break-system-package[s]*', '', line)
-                # Re-add exactly once if it was a pip install line (not pip --version etc.)
+                # Re-add exactly once if this is a pip install line
                 if _re.search(r'pip3?\s+install\b', cleaned):
                     cleaned = cleaned.rstrip() + ' --break-system-packages'
                 return cleaned
 
-            dockerfile = '\n'.join(fix_pip_line(l) for l in dockerfile.splitlines())
+            dockerfile = '\n'.join(
+                l for l in (fix_pip_line(l) for l in dockerfile.splitlines())
+                if l is not None
+            )
 
             console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages normalised[/dim cyan]")
 
