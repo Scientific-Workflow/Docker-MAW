@@ -59,11 +59,13 @@ class OrchestratorOutput(BaseModel):
     next:                Literal["planner", "installer", "codegen", "executor", "end"]
     feedback:            str
     dockerfile_approved: bool = False
+    skill_requests:      list[str] = []  # e.g. ["use_cases/molecular_nucleation/orchestrator"]
 
 class PlannerOutput(BaseModel):
     literature_findings: list[str]
     stack_decision:      list[str]
     tasks:               list[str]
+    skill_requests:      list[str] = []  # e.g. ["use_cases/molecular_nucleation/planner", "systems/parsl"]
 
 class CodeFile(BaseModel):
     filename: str
@@ -89,130 +91,30 @@ class SkillUpdaterOutput(BaseModel):
 # __ Agent Prompts _____________________________________________________________
 
 ORCHESTRATOR_SYSTEM_PROMPT = """\
-You are the supervisor orchestrator for a scientific workflow reproduction system.
-You coordinate specialized agents to reproduce a computational workflow from a research paper inside a Docker container.
-
-After each agent completes, you review its output critically and decide where to route next.
-
-Agents:
-- planner    — reads the PDF, extracts literature findings, dependency stack, and ordered tasks
-- codegen    — generates Parsl workflow code AND a Docker run launcher script for LAMMPS + OVITO (merged into one agent)
-- executor   — runs the generated workflow inside the Docker container, captures stdout/stderr
-- end        — signals successful completion
-
-General flow (follow unless you have reason to deviate):
-planner → codegen → executor → end
-
-NOTE: There is no installer agent. The sandbox Docker image (maw-sandbox:latest) is pre-built and always available. Do NOT route to installer under any circumstances.
-
-Runtime environment:
-The workflow runs inside a single local Docker container on a developer machine — NOT an HPC cluster.
-There is no MPI network fabric, no SLURM, no multi-node communication, and no shared filesystem across nodes.
-When reviewing agent outputs or giving feedback, always reason in terms of single-node, single-process execution.
-LAMMPS runs via the Python API (from lammps import lammps) in serial mode — do NOT recommend mpirun, openmpi, mpich, or any MPI packages to the installer. MPI is not needed and will cause crashes in this environment.
-
-You MUST review each agent's output before proceeding. Route BACK with specific feedback if:
-- After planner:   tasks are vague, parameters are missing, or stack is wrong for the paper
-- After installer: Dockerfile is missing packages, uses wrong base image, or doesn't match stack_decision
-- After codegen:   code is structurally incomplete (missing functions, missing main(), no files generated). Do NOT invent runtime errors — you cannot execute code. If the code looks complete and plausible, route to executor immediately.
-- After executor: execution failed
-    → If stderr contains "ModuleNotFoundError: No module named" or "ImportError: No module named",
-      route to installer with the exact missing package name in the feedback field.
-    → If stderr contains "ORTE_ERROR_LOG" or "orte_init" or "MPI_Init" or "orted" or "WorkerLost" combined with MPI mentions,
-      route to installer with feedback: "LAMMPS MPI init failure — add ENV PATH=/usr/lib/openmpi/bin:$PATH to the Dockerfile so ORTE can find orted at runtime."
-    → For ALL other failures (LAMMPS errors, Parsl errors, logic errors, segfaults, wrong output,
-      file not found), route to codegen with the full stderr. LAMMPS runtime errors are code errors,
-      not missing packages.
-
-When routing back, always provide specific, actionable feedback in the feedback field.
-When proceeding forward normally, set feedback to empty string.
-When execution succeeds, route to "end".
-
-TWO-PHASE INSTALLER REVIEW:
-The installer works in two phases and requires your explicit sign-off between them:
-  Phase 1 — generates the Dockerfile and stops. current_step will be "installer_dockerfile_pending_approval".
-  Phase 2 — builds the actual Docker image. Only runs after you approve.
-
-When current_step is "installer_dockerfile_pending_approval", you MUST review dockerfile and either:
-  APPROVE: set dockerfile_approved=true, next="installer", feedback=""
-    → installer will proceed to build the Docker image
-  REJECT:  set dockerfile_approved=false, next="installer", feedback="<specific issues>"
-    → installer will regenerate the Dockerfile and return for review again
-
-What to check in the Dockerfile:
-- All packages from stack_decision are present
-- Base image is ubuntu:24.04 (NOT 22.04 — 24.04 is required for OVITO ARM64 support)
-- LAMMPS installed via pip (not source build)
-- libopenmpi3 is present in the apt-get install list — this is REQUIRED and CORRECT.
-  The pip lammps wheel links against libmpi.so.12 at runtime. libopenmpi3 provides
-  ONLY the shared library file, not mpirun or mpiexec. LAMMPS still runs in serial mode.
-  Do NOT reject a Dockerfile for including libopenmpi3.
-- pip install commands use --break-system-packages flag (required on Ubuntu 24.04)
-- ENV, RUN, and WORKDIR instructions are all present and correct
-- No conda, no mamba
-- No openmpi-bin, no mpirun, no mpiexec, no mpi4py (these are NOT needed and NOT allowed)
-
-In all situations other than approving a pending Dockerfile, set dockerfile_approved=false.
-
-State fields available to you:
-- goal, pdf_path, current_step
-- literature_findings, stack_decision, tasks   (from planner)
-- dockerfile                                   (from installer phase 1 — review before approving)
-- code_output                                  (from codegen)
-- execution_output                             (from executor — stdout/stderr)
-
+Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
-- reasoning:          your analysis of the current state and why you are routing where you are
-- next:               one of "planner", "installer", "codegen", "executor", "end"
-- feedback:           specific actionable criticism for the receiving agent, or empty string if proceeding normally
-- dockerfile_approved: true only when approving a pending Dockerfile, false in all other cases
+- reasoning:           str — your analysis of the current state
+- next:                "planner" | "installer" | "codegen" | "executor" | "end"
+- feedback:            str — specific actionable feedback for the receiving agent, or "" if proceeding normally
+- dockerfile_approved: bool — true ONLY when approving a pending Dockerfile, false in all other cases
+- skill_requests:      list[str] — skill paths to load (first call only; empty on subsequent calls)
 \
 """
 
 PLANNER_PROMPT = """\
-You are a scientific workflow analyst. You will be given the full text of a research paper and a goal.
+Your agent skill file contains your full operating instructions. Follow them.
 
-Runtime environment: The workflow runs inside a single local Docker container on a developer machine — NOT an HPC cluster. There is no SLURM, no MPI across nodes, no job scheduler, and no HPC infrastructure. Recommend only tools and packages that run in a single process inside a Docker container. Do NOT recommend MPI, mpirun, OpenMPI, MPICH, mpi4py, SLURM, PBS, or any HPC-specific parallelism tools.
+Return ONLY a valid JSON object with exactly these keys:
+- literature_findings: list[str] — specific, quantitative facts extracted from the paper
+- stack_decision:      list[str] — packages available in the sandbox Dockerfile only
+- tasks:               list[str] — ordered, Python-API-level implementation steps
+- skill_requests:      list[str] — skill paths to load (first call only; empty on subsequent calls)
 
-Extract everything needed to reproduce the computational workflow described in the paper and return it as a JSON object with exactly these three keys:
-- literature_findings: list of strings — key methods, parameters, and scientific context needed to reproduce the workflow
-- stack_decision: list of strings — all required software and Python packages with versions where known
-- tasks: list of strings — ordered concrete implementation steps, each describing what to do, what tool to use, and what parameters are involved
-
-Be specific and technical. The target workflow uses LAMMPS for molecular dynamics simulation of water freezing, OVITO for diamond structure detection, and Parsl for workflow orchestration.
-
-Return ONLY a valid JSON object. No markdown, no code fences, no explanation.
-
-The only packages you can choose and plan for are:
-
----
-
-EXAMPLE OUTPUT:
-{
-  "literature_findings": [
-    "The workflow uses LAMMPS molecular dynamics to simulate water crystallization using the TIP4P/Ice force field at 210K, 220K, and 230K undercoolings",
-    "Diamond structure identification is performed in-situ using OVITO's IdentifyDiamondModifier",
-    "Parsl @python_app decorators are used to define LAMMPS simulation and OVITO analysis as parallel tasks"
-  ],
-  "stack_decision": ["lammps", "ovito>=3.0", "parsl>=2024.0.0", "numpy", "python>=3.10"],
-  "tasks": [
-    "Write a LAMMPS input script that initializes a 4000-atom TIP4P/Ice water box at 210K",
-    "Define a Parsl @python_app function run_lammps(input_script, workdir) that calls lmp.file(input_script)",
-    "Define a Parsl @python_app function analyze_with_ovito(frames_glob, out_png) using IdentifyDiamondModifier"
-  ]
-}
-
----
+No markdown, no code fences, no explanation outside the JSON.
 
 HANDLING ORCHESTRATOR FEEDBACK:
-If the input ends with a section titled "Orchestrator feedback", it means a previous version of your output was rejected. You MUST:
-1. Read every point in the feedback carefully
-2. Identify exactly what was wrong or missing
-3. Fix each issue in your new output — do not repeat the same mistakes
-4. Your revised output will be reviewed again before the workflow proceeds
-
-Now apply this same structure and level of detail to the paper and goal provided.\
+If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
 """
 
 # INSTALLER_PROMPT = """\
@@ -278,130 +180,22 @@ Now apply this same structure and level of detail to the paper and goal provided
 # """
 
 CODEGEN_PROMPT = """\
-You are a scientific workflow code generator. Your job is to write Python code that uses Parsl to orchestrate a LAMMPS molecular dynamics simulation followed by OVITO structural analysis, running inside a local Docker container on a developer machine — NOT an HPC cluster. There is no SLURM, no MPI across nodes, and no HPC job scheduler. Use single-node, single-process configurations only.
+Your agent skill file contains your full operating instructions. Follow them.
 
-You will be given:
-- A list of literature findings (methods, parameters, scientific context)
-- An ordered list of tasks to implement
-- The Docker image tag for the sandbox container
-- The path to the LAMMPS input files (in.watbox, data.init, AW.tersoff)
+Generate exactly two files. Return ONLY a valid JSON object:
+{
+  "files": [
+    {"filename": "workflow.py",     "content": "<full file content>"},
+    {"filename": "run_workflow.sh", "content": "<full file content>"}
+  ]
+}
 
-Generate a complete, working Python workflow. Return a JSON object with exactly one key:
-- files: list of objects, each with:
-    - filename: string (e.g. "workflow.py")
-    - content: string (the full file content)
-
-You MUST generate exactly these two files:
-
----
-
-FILE 1: workflow.py
-A self-contained Parsl workflow script. It must:
-
-1. Import Parsl and configure it using a LOCAL executor by default (so it works on any machine without a scheduler):
-   ```python
-   from parsl.config import Config
-   from parsl.executors import HighThroughputExecutor
-   from parsl.providers import LocalProvider
-   import parsl
-
-   config = Config(
-       executors=[
-           HighThroughputExecutor(
-               label="local_htex",
-               cores_per_worker=1,
-               provider=LocalProvider(
-                   min_blocks=1,
-                   max_blocks=1,
-                   init_blocks=1,
-               ),
-           )
-       ],
-       strategy="none",
-   )
-   parsl.load(config)
-   ```
-   CRITICAL: Do NOT add max_workers, max_workers_per_node, or any other kwargs not shown above — they do not exist in recent Parsl versions and will cause a TypeError at startup. Copy this config exactly.
-
-2. Define a Parsl @python_app called run_lammps(input_script, data_dir, work_dir) that:
-   - Creates work_dir if it does not exist
-   - Copies data.init and AW.tersoff from data_dir into work_dir
-   - Also copies the input script into work_dir
-   - ALWAYS copies the input script fresh into work_dir using shutil.copy2 — do NOT skip the copy if the file already exists, as the user may have updated it
-   - CRITICAL: do NOT modify or patch the input script in any way. Do not change the run count, timesteps, temperature, seed, or any other parameter. Use the script exactly as provided.
-   - Creates a "frames/" subdirectory inside work_dir (LAMMPS dumps trajectories there)
-   - CRITICAL: calls os.chdir(work_dir) BEFORE running LAMMPS — the input script dumps to "frames/" relative to CWD, so the CWD must be work_dir or frames will go to the wrong place:
-     ```python
-     import os
-     os.chdir(work_dir)
-     os.makedirs("frames", exist_ok=True)
-     from lammps import lammps
-     lmp = lammps(cmdargs=["-screen", "none"])
-     lmp.file(os.path.join(work_dir, os.path.basename(input_script)))
-     lmp.close()
-     ```
-   - Returns the path to the frames directory (os.path.join(work_dir, "frames"))
-
-3. Define a Parsl @python_app called analyze_with_ovito(frames_dir, output_csv) that:
-   - Uses ovito.io.import_file with a glob pattern to load all LAMMPS dump files from frames_dir
-   - Applies ovito.modifiers.IdentifyDiamondModifier to identify ice-like (diamond cubic) atoms
-   - Iterates over all frames using pipeline.compute(frame_index)
-   - Extracts the count of cubic_diamond and hexagonal_diamond type atoms per frame
-   - Writes a CSV file to output_csv with columns: frame, timestep, cubic_diamond_count, hexagonal_diamond_count
-   - Returns the path to the output CSV
-
-4. A main() function that:
-   - MUST use exactly these two argparse arguments and no others that conflict:
-       --data-dir   (default: /app/data)    — directory containing in.watbox, data.init, AW.tersoff
-       --work-dir   (default: /app/work/run0) — output directory for frames, CSVs, renders
-     Any additional optional args are fine, but --data-dir and --work-dir MUST be present with these exact names.
-   - Calls run_lammps(...).result() to block until LAMMPS is done
-   - Calls analyze_with_ovito(...).result() to block until OVITO is done
-   - Prints a summary of results from the CSV
-   - Calls parsl.clear() at the end
-
-5. if __name__ == "__main__": calls main()
-
----
-
-FILE 2: run_workflow.sh
-A bash launcher script that runs workflow.py inside the Docker container. It must:
-- Accept the image tag as $1 (first argument), defaulting to "maw-sandbox:latest" if not provided
-- Resolve the repo root using SCRIPT_DIR/REPO_DIR — NEVER use $(pwd):
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_DIR="$(dirname "$SCRIPT_DIR")"
-- Use: docker run --rm -v "$REPO_DIR":/app -w /app/builds "$IMAGE" python3 /app/builds/workflow.py
-- Pass --data-dir /app/data --work-dir /app/work/run0 as arguments to workflow.py
-- Print a clear start message before launching
-
----
-
-IMPORTANT RULES:
-- Use only the lammps Python wheel API (from lammps import lammps) — do NOT call the lammps binary as a subprocess
-- Use ovito.io.import_file() to create the pipeline — do NOT call Pipeline() constructor directly. Import modifiers from ovito.modifiers.
-- All file paths must be constructed with os.path.join — no hardcoded absolute paths
-- The LAMMPS dump command in in.watbox writes to "frames/step.*.lammpstrj" relative to CWD — your code must cd into work_dir or set the working directory so these paths resolve correctly
-- Do NOT use conda; all packages are already pip-installed in the container
-- Return ONLY a valid JSON object with the "files" key — no markdown, no code fences, no explanation outside the JSON
-- Do NOT hardcode or override timestep counts, run lengths, temperatures, or seeds — use whatever is in the input script as-is
-
-VISUALIZATION RULES (these are mandatory — do not deviate):
-- Atom size must use s=25 minimum. Atoms must be clearly visible and large enough to see structure.
-- Color scheme: liquid/unstructured atoms = cyan (#00BFFF), cubic diamond atoms = bright blue (#0000FF), hexagonal diamond atoms = bright red (#FF2200). Do NOT use gray or near-transparent colors for any atom type — all atoms must be clearly visible.
-- Alpha for all atom types must be >= 0.6 so atoms are clearly visible in the rendered image.
-s
-
----
+No markdown, no code fences, no explanation outside the JSON.
 
 HANDLING ORCHESTRATOR FEEDBACK:
-If the input ends with a section titled "Orchestrator feedback", it means a previous version of your code was rejected. You MUST:
-1. Read every point in the feedback carefully — it may flag import errors, wrong API usage, path issues, or runtime failures
-2. Fix every issue raised in the new version of the code
-3. Do not remove working logic — only fix what was flagged
-4. Your revised code will be reviewed and re-executed
-5. YOU MUST FIX THE ISSUE THE ORCHESTRATOR IDENTIFIES. 
-
-Now generate the workflow code based on the literature findings and tasks provided.\
+If the input ends with "Orchestrator feedback", fix every issue raised.
+Do not remove working logic — only fix what was flagged.
+YOU MUST FIX THE ISSUE THE ORCHESTRATOR IDENTIFIES.\
 """
 
 EXECUTOR_PROMPT = "TODO"
@@ -416,15 +210,25 @@ You will be given:
 Your job is to return an updated version of any skill files that need improvement.
 
 RULES:
-1. Preserve all existing section numbers and headers - do not reorder or rename sections.
-2. Only add or modify content within sections - specifically the pitfalls table, code examples, and checklists.
-3. Be specific - new pitfall rows must include the exact error message pattern or a recognizable excerpt.
-4. No duplication - if a pitfall already exists, update it rather than adding a duplicate row.
+1. Preserve all existing YAML frontmatter, section headers, and document structure - do not reorder or rename sections.
+2. Only add or modify content within sections - specifically pitfall tables, code examples, and rules lists.
+3. Be specific - new pitfall entries must include the exact error message pattern or a recognizable excerpt.
+4. No duplication - if a pitfall already exists, update it rather than adding a duplicate entry.
 5. Only add things that actually happened in this run - do not invent pitfalls not evidenced in the state.
 6. Every addition must be a concrete rule or code example, not a vague observation.
 7. If no update is needed for a skill file, do not include it in the updates list.
 8. updated_content must be the COMPLETE new file content - not a diff, not a partial excerpt.
-9. Never modify Section 0 (ownership rules) of codegen/SKILL.md.
+
+Update guidance by skill type:
+- agents/orchestrator: Update when routing decisions were wrong (high revision counts). Add routing pattern that failed + correct rule.
+- agents/planner: Update when planner_revisions > 0. Add what extraction was wrong + correct approach.
+- agents/codegen: Update when codegen_revisions > 0 or execution failed. Add the error pattern + fix.
+- use_cases/molecular_nucleation/orchestrator: Update when LAMMPS-specific routing was wrong.
+- use_cases/molecular_nucleation/planner: Update when stack_decision included wrong packages or tasks were insufficient.
+- use_cases/molecular_nucleation/codegen: Update when LAMMPS/OVITO code produced errors. Add the exact fix.
+- systems/parsl: Update when Parsl-specific errors appeared in execution_output.
+
+skill_name must be the relative path without .SKILL.md extension (e.g. "agents/orchestrator", "use_cases/molecular_nucleation/codegen").
 
 Return ONLY a valid JSON object with exactly these keys:
 - updates: list of objects, each with skill_name (string), updated_content (string), reason (string)
@@ -493,6 +297,31 @@ def _invoke_structured(llm, schema, messages, retries=5):
             console.print(f"[yellow][_invoke_structured] attempt {attempt+1}: parse error ({e}), retrying...[/yellow]")
     raise last_err
 
+# __ Skill file helpers ________________________________________________________
+
+_SKILLS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+def _read_skill(rel_path: str) -> str:
+    """Read skills/<rel_path>.SKILL.md — returns '' if not found."""
+    full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
+    if os.path.isfile(full):
+        with open(full) as f:
+            return f.read()
+    return ""
+
+def _list_skills(folder: str) -> list:
+    """List available names in skills/<folder>/: subdirectory names AND .SKILL.md base names."""
+    d = os.path.join(_SKILLS_ROOT, folder)
+    if not os.path.isdir(d):
+        return []
+    results = []
+    for name in os.listdir(d):
+        if os.path.isdir(os.path.join(d, name)):
+            results.append(name)                  # e.g. "molecular_nucleation"
+        elif name.endswith(".SKILL.md"):
+            results.append(os.path.splitext(name)[0])  # e.g. "parsl"
+    return results
+
 # __ Nodes _____________________________________________________________________
 
 def orchestrator(state: AgentState) -> dict:
@@ -524,10 +353,30 @@ def orchestrator(state: AgentState) -> dict:
     if state.get("execution_output") and state.get("current_step") != "installer_dockerfile_pending_approval":
         parts.append(f"Execution output (latest):\n{state['execution_output'][-1]}")
 
+    # Build system prompt: base skill + available skill index + core prompt
+    _base = _read_skill("agents/orchestrator")
+    _uc   = _list_skills("use_cases")
+    _sys  = _list_skills("systems")
+    _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+              f"\n  use_cases: {_uc}  — request as \"use_cases/<name>/orchestrator\""
+              f"\n  systems:   {_sys}  — request as \"systems/<name>\"") if (_uc or _sys) else ""
+    _sys_prompt = (_base + _index + "\n\n---\n\n" + ORCHESTRATOR_SYSTEM_PROMPT) if _base else ORCHESTRATOR_SYSTEM_PROMPT
+    _human = "\n\n".join(parts)
+
     result: OrchestratorOutput = _invoke_structured(model, OrchestratorOutput, [
-        SystemMessage(content=ORCHESTRATOR_SYSTEM_PROMPT),
-        HumanMessage(content="\n\n".join(parts)),
+        SystemMessage(content=_sys_prompt),
+        HumanMessage(content=_human),
     ])
+
+    # Two-pass: if sub-skills requested, load them and re-invoke once
+    if result.skill_requests:
+        _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+        if _sub:
+            _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass — do not set skill_requests.)"
+            result = _invoke_structured(model, OrchestratorOutput, [
+                SystemMessage(content=_enriched),
+                HumanMessage(content=_human),
+            ])
 
     # Hard overrides: lock routing at deterministic transition points
     if state.get("current_step") == "installer_dockerfile_pending_approval":
@@ -584,10 +433,30 @@ def planner(state: AgentState) -> dict:
         feedback_section = (f"\n\nOrchestrator feedback — address these issues before returning:\n{feedback}"
                             if feedback else "")
 
+        # Build system prompt: base skill + available skill index + core prompt
+        _base = _read_skill("agents/planner")
+        _uc   = _list_skills("use_cases")
+        _sys  = _list_skills("systems")
+        _index = (f"\n\nAvailable skill contexts (set in skill_requests to load):"
+                  f"\n  use_cases: {_uc}  — request as \"use_cases/<name>/planner\""
+                  f"\n  systems:   {_sys}  — request as \"systems/<name>\"") if (_uc or _sys) else ""
+        _sys_prompt = (_base + _index + "\n\n---\n\n" + PLANNER_PROMPT) if _base else PLANNER_PROMPT
+        _human = f"Goal: {state['goal']}\n\nPaper:\n{pdf_text}{feedback_section}"
+
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
-            SystemMessage(content=PLANNER_PROMPT),
-            HumanMessage(content=f"Goal: {state['goal']}\n\nPaper:\n{pdf_text}{feedback_section}"),
+            SystemMessage(content=_sys_prompt),
+            HumanMessage(content=_human),
         ])
+
+        # Two-pass: if sub-skills requested, load them and re-invoke once
+        if result.skill_requests:
+            _sub = "\n\n".join(filter(None, (_read_skill(r) for r in result.skill_requests)))
+            if _sub:
+                _enriched = _sys_prompt + f"\n\n=== Loaded Skills ===\n{_sub}\n\n(Final pass — do not set skill_requests.)"
+                result = _invoke_structured(model, PlannerOutput, [
+                    SystemMessage(content=_enriched),
+                    HumanMessage(content=_human),
+                ])
 
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
 
@@ -699,9 +568,16 @@ def installer(state: AgentState) -> dict:
             # ── Phase 1: read pre-built Dockerfile from disk, send to orchestrator for approval ──
             console.print("\n[dim cyan][installer] reading pre-built Dockerfile from disk...[/dim cyan]")
 
-            # ── Post-process: enforce platform-safe base image and pip flags ────
+            if not os.path.isfile(dockerfile_path):
+                raise FileNotFoundError(
+                    f"builds/Dockerfile not found at {dockerfile_path}. "
+                    "Place a Dockerfile there before running the agent."
+                )
+
+            with open(dockerfile_path) as _f:
+                dockerfile = _f.read()
+
             import re as _re
-            dockerfile = result.dockerfile_content
 
             # 1. Force base image to ubuntu:24.04
             dockerfile = _re.sub(r'FROM\s+ubuntu:\S+', 'FROM ubuntu:24.04', dockerfile)
@@ -796,8 +672,21 @@ def codegen(state: AgentState) -> dict:
             feedback_section
         )
 
+        _base_codegen = _read_skill("agents/codegen")
+
+        # Auto-load use-case skill from stack_decision (no skill_requests on CoderOutput)
+        _stack = [p.lower() for p in state.get("stack_decision", [])]
+        _uc_codegen = ""
+        if any("lammps" in p for p in _stack):
+            _uc_codegen = _read_skill("use_cases/molecular_nucleation/codegen")
+
+        _codegen_prompt = _base_codegen or ""
+        if _uc_codegen:
+            _codegen_prompt += "\n\n---\n\n" + _uc_codegen
+        _codegen_prompt += "\n\n---\n\n" + CODEGEN_PROMPT
+
         result: CoderOutput = _invoke_structured(coder_llm, CoderOutput, [
-            SystemMessage(content=CODEGEN_PROMPT),
+            SystemMessage(content=_codegen_prompt),
             HumanMessage(content=context),
         ])
 
@@ -872,8 +761,8 @@ def executor(state: AgentState) -> dict:
             "-e", "OVITO_GUI_MODE=0",
             image_tag,
             "python3", "workflow.py",
-            "--data-dir", "/app/data",
-            "--work-dir", "/app/work/run0",
+            "--data-dir",  "/app/data",
+            "--work-dir",  "/app/work/run0",
         ]
 
         console.print(f"[dim cyan][executor] command: {' '.join(cmd)}[/dim cyan]")
@@ -920,18 +809,11 @@ def skill_updater(state: AgentState) -> dict:
     try:
         console.print("\n[dim cyan][skill_updater] analyzing run history...[/dim cyan]")
 
-        repo_root   = os.path.dirname(os.path.abspath(__file__))
-        skills_root = os.path.join(repo_root, ".opencode", "skills")
+        def skill_path(rel: str) -> str:
+            return os.path.join(_SKILLS_ROOT, rel + ".SKILL.md")
 
-        def skill_path(name: str) -> str:
-            return os.path.join(skills_root, name, "SKILL.md")
-
-        def read_skill(name: str) -> str:
-            path = skill_path(name)
-            if os.path.isfile(path):
-                with open(path) as f:
-                    return f.read()
-            return ""
+        def read_skill(rel: str) -> str:
+            return _read_skill(rel)
 
         # ── build run summary ─────────────────────────────────────────────────
         revisions = {
@@ -955,13 +837,24 @@ def skill_updater(state: AgentState) -> dict:
         run_summary = (
             f"Revision counts: {revisions}\n"
             f"Last orchestrator feedback: {feedback or '(none)'}\n"
-            f"Docker image tag: {state.get('image_tag', 'maw-sandbox:latest')}\n"
+            f"Literature findings count: {len(state.get('literature_findings', []))}\n"
+            f"Tasks count: {len(state.get('tasks', []))}\n"
+            f"Stack decision: {state.get('stack_decision', [])}\n"
+            f"Docker image tag: {state.get('image_tag') or 'maw-sandbox:latest'}\n"
             f"{exit_code_line}\n\n"
             f"Execution output (truncated):\n{execution_tail}"
         )
 
         # ── read current skill files ──────────────────────────────────────────
-        skill_names = ["codegen", "parsl", "auto_update"]
+        skill_names = [
+            "agents/orchestrator",
+            "agents/planner",
+            "agents/codegen",
+            "use_cases/molecular_nucleation/orchestrator",
+            "use_cases/molecular_nucleation/planner",
+            "use_cases/molecular_nucleation/codegen",
+            "systems/parsl",
+        ]
         skill_contents = {name: read_skill(name) for name in skill_names}
 
         context = (
