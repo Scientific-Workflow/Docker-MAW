@@ -1,0 +1,8 @@
+builds/runinfo/
+builds/workflow.py
+builds/run_workflow.sh
+builds/Dockerfile
+work/
+__pycache__/
+*.pyc
+.env

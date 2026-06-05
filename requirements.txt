@@ -1,0 +1,12 @@
+# Agent dependencies — runs inside the agent container (python:3.11-slim)
+# DO NOT add lammps, ovito, parsl, or numpy here.
+# Those are sandbox dependencies and belong in builds/Dockerfile only.
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+python-dotenv>=1.0.0
+pypdf>=4.0.0
+pydantic>=2.0.0
+rich>=13.0.0
+ipython>=9.14.0
