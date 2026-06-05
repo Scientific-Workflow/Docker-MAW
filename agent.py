@@ -351,7 +351,10 @@ A self-contained Parsl workflow script. It must:
    - Returns the path to the output CSV
 
 4. A main() function that:
-   - Accepts DATA_DIR and WORK_DIR as constants or argparse arguments
+   - MUST use exactly these two argparse arguments and no others that conflict:
+       --data-dir   (default: /app/data)    — directory containing in.watbox, data.init, AW.tersoff
+       --work-dir   (default: /app/work/run0) — output directory for frames, CSVs, renders
+     Any additional optional args are fine, but --data-dir and --work-dir MUST be present with these exact names.
    - Calls run_lammps(...).result() to block until LAMMPS is done
    - Calls analyze_with_ovito(...).result() to block until OVITO is done
    - Prints a summary of results from the CSV
@@ -368,7 +371,7 @@ A bash launcher script that runs workflow.py inside the Docker container. It mus
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     REPO_DIR="$(dirname "$SCRIPT_DIR")"
 - Use: docker run --rm -v "$REPO_DIR":/app -w /app/builds "$IMAGE" python3 /app/builds/workflow.py
-- Pass --data-dir /app/data --work-dir /app/work/run0 --input-script /app/data/in.watbox as arguments to workflow.py
+- Pass --data-dir /app/data --work-dir /app/work/run0 as arguments to workflow.py
 - Print a clear start message before launching
 
 ---
@@ -869,9 +872,8 @@ def executor(state: AgentState) -> dict:
             "-e", "OVITO_GUI_MODE=0",
             image_tag,
             "python3", "workflow.py",
-            "--data-dir",     "/app/data",
-            "--work-dir",     "/app/work/run0",
-            "--input-script", "/app/data/in.watbox",
+            "--data-dir", "/app/data",
+            "--work-dir", "/app/work/run0",
         ]
 
         console.print(f"[dim cyan][executor] command: {' '.join(cmd)}[/dim cyan]")
