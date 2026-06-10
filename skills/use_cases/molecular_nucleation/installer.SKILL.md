@@ -2,70 +2,104 @@
 name: use_cases/molecular_nucleation/installer
 description: >
   Installer knowledge for molecular nucleation workflows. Provides verified build
-  recipes for LAMMPS source build without MPI, osmesa headless setup, and platform
-  gotchas. The installer formats a Dockerfile from the planner's stack_decision —
-  this skill provides the domain-specific build knowledge to do that correctly.
+  recipes for LAMMPS source build (no MPI) inside a conda environment, OSMesa
+  headless setup, and platform gotchas. The installer generates environment.yml +
+  install.sh from the planner's stack_decision — this skill provides the
+  domain-specific build knowledge to do that correctly.
 ---
 
 # Molecular Nucleation — Installer Skill
 
-Domain-specific Dockerfile construction knowledge for workflows that use LAMMPS, OVITO, and Parsl.
+Domain-specific conda environment construction knowledge for workflows that use LAMMPS, OVITO, and Parsl.
 
 ---
 
 ## Your Job
 
-The planner has already decided what to install. Your job is to write a correct Dockerfile that builds it. This skill provides the verified build recipes and known platform gotchas for the tools in this domain. Use them when the `stack_decision` calls for them — do not use them when it does not.
+The planner has already decided what to install. Your job is to write a correct `environment.yml` and `install.sh` that builds it. This skill provides the verified build recipes and known platform gotchas for the tools in this domain.
 
 ---
 
-## LAMMPS Source Build (no MPI)
+## LAMMPS Source Build (no MPI) — install.sh
 
 When `stack_decision.special_installs` includes `lammps_source_build_no_mpi`:
 
-**Why source build:** The `pip install lammps` wheel calls `MPI_Init` on import even in serial mode. Without `orted` in PATH, this produces `ORTE_ERROR_LOG` / `orte_init failure` before any simulation runs. Source build with `-DBUILD_MPI=off` has zero MPI dependency.
+**Why source build:** The `pip install lammps` wheel calls `MPI_Init` on import even in serial mode. Source build with `-DBUILD_MPI=off` has zero MPI dependency and runs reliably in a conda env without a running MPI daemon.
 
-**Verified build sequence:**
+**Verified install.sh sequence:**
 
-```dockerfile
-# LAMMPS from source — stable_2Aug2023_update3, no MPI
-RUN cd /tmp && \
-    wget -q https://github.com/lammps/lammps/archive/refs/tags/stable_2Aug2023_update3.tar.gz && \
-    tar xzf stable_2Aug2023_update3.tar.gz && \
-    cd lammps-stable_2Aug2023_update3 && \
-    mkdir build && cd build && \
-    cmake ../cmake \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
-      -DBUILD_MPI=off \
-      -DBUILD_OMP=off \
-      -DBUILD_SHARED_LIBS=on \
-      -DLAMMPS_EXCEPTIONS=on \
-      -DPKG_MANYBODY=on \
-      -DPKG_MOLECULE=on \
-      -DPKG_KSPACE=on \
-      -DPKG_RIGID=on \
-      -DPKG_PYTHON=on \
-      -DFFT=FFTW3 && \
-    make -j$(nproc) && \
-    make install && \
-    echo '/usr/local/lib' > /etc/ld.so.conf.d/local.conf && ldconfig && \
-    cd /tmp/lammps-stable_2Aug2023_update3/python && \
-    PYTHONNOUSERSITE=1 pip3 install . --break-system-packages && \
-    rm -rf /tmp/lammps-stable_2Aug2023_update3 /tmp/stable_2Aug2023_update3.tar.gz
+```bash
+#!/bin/bash
+set -e
 
-ENV LD_LIBRARY_PATH=/usr/local/lib
+cd /tmp
+wget -q https://github.com/lammps/lammps/archive/refs/tags/stable_2Aug2023_update3.tar.gz
+tar xzf stable_2Aug2023_update3.tar.gz
+cd lammps-stable_2Aug2023_update3
+mkdir build && cd build
+cmake ../cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX \
+  -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
+  -DBUILD_MPI=off \
+  -DBUILD_OMP=off \
+  -DBUILD_SHARED_LIBS=on \
+  -DLAMMPS_EXCEPTIONS=on \
+  -DPKG_MANYBODY=on \
+  -DPKG_MOLECULE=on \
+  -DPKG_KSPACE=on \
+  -DPKG_RIGID=on \
+  -DPKG_PYTHON=on \
+  -DFFT=FFTW3 \
+  -DFFTW3_ROOT=$CONDA_PREFIX
+make -j$(nproc)
+make install
+cd /tmp/lammps-stable_2Aug2023_update3/python
+pip install .
+rm -rf /tmp/lammps-stable_2Aug2023_update3 /tmp/stable_2Aug2023_update3.tar.gz
 ```
 
-**Required apt packages for this build:** `build-essential`, `cmake`, `wget`, `git`, `libfftw3-dev`, `libpng-dev`, `libjpeg-dev`, `python3-dev`
+**`-DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX` is mandatory.** Without it, cmake defaults to `/root/.local` or `/usr/local`, outside the conda env. `liblammps.so` will not be found by Python inside the env.
 
-**`-DCMAKE_INSTALL_PREFIX=/usr/local` is mandatory.** Without it, cmake defaults to `/root/.local` as the install path, so `liblammps.so` lands in `/root/.local/lib/` instead of `/usr/local/lib/`. Nothing downstream finds it.
+**`-DCMAKE_PREFIX_PATH=$CONDA_PREFIX` is mandatory.** This tells cmake to find FFTW3, libpng, zlib, etc. from the conda env rather than the system. Without it, cmake finds wrong or missing libraries.
 
-**`PYTHONNOUSERSITE=1` on the pip install step is mandatory.** Without it, pip defaults to a user-local install (`~/.local/lib`) even as root, putting the Python package where Python can't find it. `PYTHONNOUSERSITE=1` forces pip to install to the system `dist-packages` path. Do NOT use `--prefix=/usr/local` — that installs to `site-packages` which Ubuntu Python does not search.
+**`-DFFTW3_ROOT=$CONDA_PREFIX`** ensures the FFTW3 cmake module finds the conda-forge `fftw` package.
 
-**`ldconfig` after `make install` is mandatory** — writes `/usr/local/lib` into the system linker cache so `liblammps.so` is discoverable by any subprocess regardless of environment variable inheritance.
+**`pip install .` (not `pip install . --break-system-packages`).** In a conda env, pip does not need `--break-system-packages`. Adding it causes a warning or error.
 
-**Do NOT write** `ENV LD_LIBRARY_PATH=...:$LD_LIBRARY_PATH` — the self-reference evaluates to empty string and creates a malformed path.
+**After install, `liblammps.so` is in `$CONDA_PREFIX/lib`.** The executor passes `LD_LIBRARY_PATH` via env_vars, so no post-install ldconfig needed.
+
+---
+
+## Required environment.yml entries for LAMMPS build
+
+```yaml
+dependencies:
+  - python=3.11
+  - cmake
+  - fftw
+  - libpng
+  - libjpeg-turbo
+  - zlib
+  - gcc
+  - gxx_linux-64
+  - make
+  - wget
+  - git
+  - pip
+  - pip:
+    - ovito
+    - "parsl>=2024.0.0"
+    - numpy
+    - matplotlib
+    - Pillow
+```
+
+`mesalib` for headless rendering (covers OSMesa):
+```yaml
+  - mesalib
+  - glib
+```
 
 ---
 
@@ -73,36 +107,26 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 
 When `stack_decision.env_vars` includes `LIBGL_ALWAYS_SOFTWARE`, `PYOPENGL_PLATFORM`, or `OVITO_GUI_MODE`:
 
-**Required apt packages:** `libosmesa6`, `libgl1`, `libegl1`, `libopengl0`, `libglib2.0-0`, `libxkbcommon0`, `libxkbcommon-x11-0`, `libdbus-1-3`, `libxcb-icccm4`, `libxcb-image0`, `libxcb-keysyms1`, `libxcb-render-util0`, `libxcb-xinerama0`, `libxcb-xkb1`, `libxrender1`, `libxi6`, `libxtst6`
-
-**ENV instructions to add:**
-```dockerfile
-ENV LIBGL_ALWAYS_SOFTWARE=1
-ENV PYOPENGL_PLATFORM=osmesa
-ENV OVITO_GUI_MODE=0
+Add to `environment.yml` dependencies:
+```yaml
+  - mesalib
+  - glib
+  - dbus
+  - xkeyboard-config
 ```
 
----
-
-## Ubuntu 24.04 pip Rule
-
-Every `pip3 install` line must end with `--break-system-packages`. Ubuntu 24.04 enforces PEP 668 (externally managed Python). Without this flag, pip refuses to install.
+The env_vars themselves (`LIBGL_ALWAYS_SOFTWARE=1`, `PYOPENGL_PLATFORM=osmesa`, `OVITO_GUI_MODE=0`) are NOT written into `environment.yml` — they are passed by the executor at runtime via the subprocess env dict.
 
 ---
 
 ## Hash-Based Rebuild Skip
 
-The Phase 2 build is skipped if the Dockerfile MD5 matches the hash stored in `builds/.dockerfile_hash` AND the image already exists. This means the ~20 minute LAMMPS build only runs when the Dockerfile actually changes. Do not manually delete this file.
+The Phase 2 build is skipped if the MD5 hash of (`environment.yml` + `install.sh`) matches `builds/.env_spec_hash` AND the `maw_sandbox` env exists. This means the ~20 minute LAMMPS build only runs when the spec actually changes.
 
 ---
 
-## Dockerfile Layer Ordering
+## env_vars in stack_decision
 
-For this domain, the correct ordering is:
-1. `FROM` base image
-2. `ENV DEBIAN_FRONTEND=noninteractive`
-3. Single `RUN apt-get update && apt-get install -y ... && rm -rf /var/lib/apt/lists/*`
-4. pip installs (standard packages)
-5. LAMMPS source build (if in special_installs) — this takes the most time, put it late so earlier layers cache
-6. `WORKDIR`
-7. `ENV` runtime variables (LIBGL, LD_LIBRARY_PATH, etc.)
+`env_vars` (e.g., `LD_LIBRARY_PATH=/path`) are NOT added to `environment.yml`. They are passed by the executor to `conda run` via `subprocess env=` dict. Include them in `stack_decision` for the executor to pick up — the installer does not touch them.
+
+The one exception: `LD_LIBRARY_PATH=$CONDA_PREFIX/lib` may need to be set at workflow runtime so LAMMPS's `liblammps.so` can be found. The planner should include `"LD_LIBRARY_PATH": "$CONDA_PREFIX/lib"` in `env_vars` — the executor expands environment variables in the subprocess env automatically.

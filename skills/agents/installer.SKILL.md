@@ -1,20 +1,21 @@
 ---
 name: agents/installer
 description: >
-  Base skill for the installer agent. Covers the two-phase Dockerfile generation and
-  build process: Phase 1 generates a Dockerfile from the planner's stack_decision,
-  Phase 2 builds the Docker image. Covers approval flow, skip logic, and formatting rules.
+  Base skill for the installer agent. Covers the two-phase conda environment spec
+  generation and build process: Phase 1 generates environment.yml + install.sh from
+  the planner's stack_decision, Phase 2 runs conda env create and install.sh.
+  Covers approval flow, skip logic, and formatting rules.
 ---
 
 # Installer Agent — Base Skill
 
-Generates the sandbox Docker image. Phase 1 produces a Dockerfile from the planner's `stack_decision` for orchestrator review. Phase 2 builds the image — skipped if the image already exists and the Dockerfile is unchanged.
+Generates the `maw_sandbox` conda environment. Phase 1 produces `environment.yml` and `install.sh` from the planner's `stack_decision` for orchestrator review. Phase 2 creates the environment — skipped if the env already exists and the spec is unchanged.
 
 ---
 
 ## Your Job
 
-You receive a fully-specified `stack_decision` from the planner. Your job is to translate it into a correct, buildable Dockerfile. You do not decide what to install — the planner already decided that. You decide how to install it correctly.
+You receive a fully-specified `stack_decision` from the planner. Your job is to translate it into a correct `environment.yml` and `install.sh`. You do not decide what to install — the planner already decided that. You decide how to install it correctly for conda.
 
 Pair this base skill with the use-case installer skill for domain-specific build patterns (source builds, known platform gotchas).
 
@@ -22,56 +23,120 @@ Pair this base skill with the use-case installer skill for domain-specific build
 
 ## Two-Phase Flow
 
-### Phase 1 — Generate the Dockerfile
+### Phase 1 — Generate the env spec
 
-Read `stack_decision` from state. Generate a complete Dockerfile that implements every field:
-- `base_image` → `FROM` instruction
-- `apt_packages` → single `RUN apt-get update && apt-get install -y` block, clean up apt lists at the end
-- `pip_packages` → `RUN pip3 install` with `--break-system-packages` on Ubuntu base images
-- `special_installs` → custom `RUN` blocks; consult the use-case installer skill for verified build recipes
-- `env_vars` → one `ENV` instruction per variable
-- `workdir` → `WORKDIR` instruction
+Read `stack_decision` from state. Generate:
 
-Return: `{"dockerfile": <content>, "current_step": "installer_dockerfile_pending_approval"}`
+1. `environment.yml` — implements `apt_packages` (as conda-forge equivalents), `pip_packages`, python version
+2. `install.sh` — implements `special_installs` as bash commands running inside the conda env
 
-### Phase 2 — Build the Image
+Return: `{"environment_yml": <content>, "install_script": <content>, "current_step": "installer_env_spec_pending_approval"}`
 
-Only runs after the orchestrator sets `dockerfile_approved=True`.
+### Phase 2 — Build the environment
 
-Check if the image can be skipped before building:
-```bash
-docker images -q <image_tag>
-```
-Also compare the MD5 hash of the current Dockerfile against the stored hash in `builds/.dockerfile_hash`. If both the image exists AND the hash matches, skip the build and return immediately.
+Only runs after the orchestrator sets `env_spec_approved=True`.
 
-If build is needed: `docker build -t <image_tag> -f builds/Dockerfile <build_context>`
+Check if the env can be skipped before building:
+- MD5 hash of `environment.yml` + `install.sh` contents matches `builds/.env_spec_hash`
+- AND `maw_sandbox` appears in `conda env list`
 
-Return: `{"image_tag": <tag>, "current_step": "installer_complete"}`
+If both true → skip and return `installer_complete`.
+
+If env does NOT exist: `conda env create -n maw_sandbox --file environment.yml`
+If env EXISTS but changed: `conda env update -n maw_sandbox --file environment.yml --prune`
+
+After env create/update, if `install.sh` has content beyond the shebang:
+`conda run -n maw_sandbox --no-capture-output bash builds/install.sh`
+
+Return: `{"current_step": "installer_complete"}`
 
 ---
 
-## Dockerfile Formatting Rules
+## environment.yml Format
 
-- Always use a single `RUN apt-get update && apt-get install -y ... && rm -rf /var/lib/apt/lists/*` block for system packages — minimizes image layers and cleans apt cache
-- Every `pip3 install` line must include `--break-system-packages` **as a flag to pip3 install, before any `&&` continuation** — `pip3 install . --break-system-packages && \` is correct; `pip3 install . && \ --break-system-packages` is wrong and will fail
-- `ENV` instructions: one variable per line — do NOT chain multiple vars in one `ENV` instruction
-- `ENV LD_LIBRARY_PATH=/usr/local/lib` — do NOT self-reference (`$LD_LIBRARY_PATH`) in this line; it evaluates to empty string at build time
-- `WORKDIR` goes after all installs, before `ENV` runtime vars
-- Do NOT use `pip3 install --upgrade pip` — on Ubuntu 24.04 this fails because Debian pip has no RECORD file
+```yaml
+name: maw_sandbox
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - cmake
+  - fftw
+  - libpng
+  - libjpeg-turbo
+  - zlib
+  - mesalib
+  - glib
+  - git
+  - wget
+  - pip
+  - pip:
+    - ovito
+    - "parsl>=2024.0.0"
+    - numpy
+    - matplotlib
+    - Pillow
+```
+
+### apt_packages → conda-forge translation table
+
+| apt_packages entry | conda-forge equivalent |
+|---|---|
+| `cmake` | `cmake` |
+| `build-essential` | `gcc`, `gxx_linux-64`, `make` |
+| `libfftw3-dev` | `fftw` |
+| `libpng-dev` | `libpng` |
+| `libjpeg-dev` | `libjpeg-turbo` |
+| `zlib1g-dev` | `zlib` |
+| `libosmesa6` | `mesalib` |
+| `libgl1` / `libegl1` / `libopengl0` | covered by `mesalib` |
+| `libglib2.0-0` | `glib` |
+| `libxkbcommon0` | `xkeyboard-config` |
+| `libdbus-1-3` | `dbus` |
+| `wget` | `wget` |
+| `git` | `git` |
+| `python3`, `python3-pip`, `python3-dev` | covered by `python=3.11` |
+
+`base_image` and `workdir` from `stack_decision` are ignored — no container.
+
+---
+
+## install.sh Format
+
+```bash
+#!/bin/bash
+set -e
+# $CONDA_PREFIX is set by conda run and points to the maw_sandbox environment
+# Use it for all install prefixes and library paths
+
+# Example LAMMPS source build:
+cd /tmp
+wget -q https://...tarball...
+tar xzf ...
+cd lammps-.../
+mkdir build && cd build
+cmake ../cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX \
+  -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
+  ...
+make -j$(nproc) && make install
+cd /tmp/lammps-.../python
+pip install .
+rm -rf /tmp/lammps-...
+```
+
+Key rules:
+- Use `$CONDA_PREFIX` as install prefix — NOT `/usr/local`
+- No `--break-system-packages` needed in conda pip installs
+- Return empty string `""` if `special_installs` is empty
 
 ---
 
 ## Key Rules
 
-- Never proceed to Phase 2 without `dockerfile_approved=True` in state
-- Always check for existing image and hash before building — rebuilds can take 20+ minutes
-- `image_tag` returned must be a non-empty string
-- Do not add packages not in `stack_decision` — if a package is missing, the orchestrator will reject and send back for revision
-- Do not remove packages from `stack_decision` — trust the planner's specification
-
----
-
-## Notes
-
-- Uses `coder_llm` for Dockerfile generation
-- Ownership: Jacob owns installer(), INSTALLER_PROMPT, InstallerOutput
+- Never proceed to Phase 2 without `env_spec_approved=True` in state
+- Always check existing env and hash before building — LAMMPS builds take 20+ minutes
+- Do not add packages not in `stack_decision`
+- `env_vars` from `stack_decision` are NOT set in environment.yml — they are passed by the executor at runtime via subprocess env

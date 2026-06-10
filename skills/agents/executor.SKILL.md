@@ -2,12 +2,12 @@
 name: agents/executor
 description: >
   Base skill for the executor agent. Covers how to run the generated workflow inside
-  the sandbox Docker container, capture output, and return results to the orchestrator.
+  the maw_sandbox conda environment, capture output, and return results to the orchestrator.
 ---
 
 # Executor Agent — Base Skill
 
-Runs `workflow.py` inside the sandbox Docker container and captures stdout/stderr for orchestrator review.
+Runs `workflow.py` inside the `maw_sandbox` conda environment and captures stdout/stderr for orchestrator review.
 
 ---
 
@@ -19,53 +19,67 @@ Loaded on every executor() call.
 
 ## Overview
 
-The executor builds a `docker run` command that mounts the repo root at `/app` and runs `python3 /app/builds/workflow.py` with `--data-dir` and `--work-dir` arguments. Each run gets a unique timestamped directory (`work/run_YYYYMMDD_HHMMSS/`) so results are never overwritten. Returns the full stdout/stderr and exit code in `execution_output`.
+The executor calls `conda run -n maw_sandbox python3 builds/workflow.py` with `--data-dir` and `--work-dir` pointing to real host paths. Each run gets a unique timestamped directory (`work/run_YYYYMMDD_HHMMSS/`) so results are never overwritten. Returns the full stdout/stderr and exit code in `execution_output`.
+
+No containers, no Docker, no volume mounts.
 
 ---
 
 ## Step-by-Step Workflow
 
-### Step 1: Resolve image tag
+### Step 1: Resolve conda env name
 
 ```python
-image_tag = state.get("image_tag") or "maw-sandbox:latest"
+conda_env = state.get("conda_env_name") or "maw_sandbox"
 ```
 
-Use `or` not `.get(..., default)` — the key exists but may be empty string.
+### Step 2: Stage data files
 
-### Step 2: Build and run docker command
+Copy user-selected data files from `data/` into `work/<run_id>/data/`. This is the path passed as `--data-dir` to the workflow.
 
-Read environment variables from `state["stack_decision"]["env_vars"]` and pass each as a `-e KEY=VALUE` flag. Do not hardcode env vars — they come from what the planner specified.
+### Step 3: Build subprocess env
 
-```bash
-docker run --rm \
-  -v "$HOST_REPO_PATH":/app \
-  -w /app/builds \
-  -e KEY1=VALUE1 \
-  -e KEY2=VALUE2 \
-  <image_tag> \
-  python3 /app/builds/workflow.py \
-  --data-dir /app/data \
-  --work-dir /app/work/run0
+```python
+run_env = os.environ.copy()
+for k, v in state["stack_decision"]["env_vars"].items():
+    run_env[k] = v
 ```
 
-`HOST_REPO_PATH` must be the real host path (not the container path `/app`). Read from `os.environ.get("HOST_REPO_PATH", ...)`.
+Pass `env=run_env` to `subprocess.run`. Do NOT use `-e` flags — there is no Docker.
 
-### Step 3: Capture and return output
+### Step 4: Run the workflow
 
-Capture stdout + stderr combined. Append exit code line. Return in `execution_output`.
+```python
+cmd = [
+    conda_bin, "run", "-n", conda_env, "--no-capture-output",
+    "python3", workflow_py,
+    "--data-dir", data_staging,   # absolute host path
+    "--work-dir", work_dir,       # absolute host path
+]
+proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=run_env)
+```
+
+`workflow_py` is the absolute host path to `builds/workflow.py`.
+`data_staging` is the absolute host path to the per-run staged data directory.
+`work_dir` is the absolute host path to the per-run output directory.
+
+### Step 5: Capture and return output
+
+Capture stdout + stderr. Prepend exit code line. Return in `execution_output`.
 
 ---
 
 ## Key Rules and Constraints
 
-- Pass ONLY `--data-dir` and `--work-dir` to workflow.py — no `--input-script` or other args
-- Always use `HOST_REPO_PATH` for the volume mount source (not `os.getcwd()`)
+- Pass ONLY `--data-dir` and `--work-dir` to workflow.py
+- `--data-dir` and `--work-dir` are REAL HOST PATHS — no `/app/` container paths
+- env_vars go into the subprocess env dict, not as CLI flags
 - Exit code 0 = success; anything else = failure
+- `--no-capture-output` is required on `conda run` so stdout/stderr flow normally to the calling process
 
 ---
 
 ## Notes
 
-- `EXECUTOR_PROMPT = "TODO"` — executor currently uses hardcoded logic, not an LLM
+- `EXECUTOR_PROMPT = "TODO"` — executor uses hardcoded logic, not an LLM
 - Ownership: Ivy owns executor()

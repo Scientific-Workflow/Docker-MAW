@@ -40,9 +40,10 @@ class AgentState(TypedDict):
     tasks:                 list[str]
     code_output:           Annotated[list[str], operator.add]
     execution_output:      Annotated[list[str], operator.add]
-    dockerfile:            str
-    dockerfile_approved:   bool
-    image_tag:             str
+    environment_yml:       str   # content of builds/environment.yml
+    install_script:        str   # content of builds/install.sh
+    env_spec_approved:     bool
+    conda_env_name:        str
     current_step:          str
     orchestrator_feedback: str
     next:                  str
@@ -57,11 +58,11 @@ class AgentState(TypedDict):
 # __ Pydantic Schemas __________________________________________________________
 
 class OrchestratorOutput(BaseModel):
-    reasoning:           str
-    next:                Literal["planner", "installer", "codegen", "executor", "end"]
-    feedback:            str
-    dockerfile_approved: bool = False
-    skill_requests:      list[str] = []  # e.g. ["use_cases/molecular_nucleation/orchestrator"]
+    reasoning:          str
+    next:               Literal["planner", "installer", "codegen", "executor", "end"]
+    feedback:           str
+    env_spec_approved:  bool = False
+    skill_requests:     list[str] = []  # e.g. ["use_cases/molecular_nucleation/orchestrator"]
 
 class SpecialInstall(BaseModel):
     name:   str
@@ -91,7 +92,8 @@ class CoderOutput(BaseModel):
     missing_info:    str  = ""
 
 class InstallerOutput(BaseModel):
-    dockerfile_content: str
+    environment_yml: str
+    install_script:  str   # bash script content — empty string if no special installs
 
 class SkillFileUpdate(BaseModel):
     skill_name:      str   # e.g. "codegen", "parsl", "auto_update"
@@ -111,11 +113,11 @@ ORCHESTRATOR_SYSTEM_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
-- reasoning:           str — your analysis of the current state
-- next:                "planner" | "installer" | "codegen" | "executor" | "end"
-- feedback:            str — specific actionable feedback for the receiving agent, or "" if proceeding normally
-- dockerfile_approved: bool — true ONLY when approving a pending Dockerfile, false in all other cases
-- skill_requests:      list[str] — skill paths to load (first call only; empty on subsequent calls)
+- reasoning:          str — your analysis of the current state
+- next:               "planner" | "installer" | "codegen" | "executor" | "end"
+- feedback:           str — specific actionable feedback for the receiving agent, or "" if proceeding normally
+- env_spec_approved:  bool — true ONLY when approving a pending environment spec, false in all other cases
+- skill_requests:     list[str] — skill paths to load (first call only; empty on subsequent calls)
 \
 """
 
@@ -141,21 +143,45 @@ If the input ends with "Orchestrator feedback", fix every issue raised before re
 INSTALLER_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
 
-You will be given a stack_decision specification produced by the planner. Generate a complete, valid Dockerfile that implements every field in the specification exactly.
+You will be given a stack_decision specification produced by the planner. Generate a conda environment.yml and an install.sh script that implement every field in the specification.
 
-Return ONLY a valid JSON object with exactly one key:
-- dockerfile_content: str — the complete Dockerfile as a single string with \\n line breaks
+Return ONLY a valid JSON object with exactly two keys:
+- environment_yml: str — the complete environment.yml as a single string with \\n line breaks
+- install_script:  str — the complete install.sh as a single string with \\n line breaks (empty string "" if no special_installs)
 
-Rules:
-- Implement every field in stack_decision: base_image, apt_packages, pip_packages, special_installs, env_vars, workdir
+environment.yml rules:
+- name: maw_sandbox
+- channels: [conda-forge, defaults]
+- Always include python=3.11
+- Translate apt_packages to conda-forge equivalents:
+    cmake → cmake
+    build-essential → gcc, gxx_linux-64, make (or gcc_linux-64 on Linux)
+    libfftw3-dev → fftw
+    libpng-dev → libpng
+    libjpeg-dev → libjpeg-turbo
+    zlib1g-dev → zlib
+    libosmesa6 → mesalib
+    libgl1 / libegl1 / libopengl0 → mesa-libgl-devel-cos6-x86_64 OR leave to system (OSMesa is in mesalib)
+    libglib2.0-0 → glib
+    libxkbcommon0 → xkeyboard-config
+    libdbus-1-3 → dbus
+    wget → wget
+    git → git
+    python3-dev → already satisfied by python=3.11
+- Include all pip_packages under a pip: subsection in dependencies
+- base_image and workdir are IGNORED (no container)
 - Do NOT add packages not in stack_decision
-- Do NOT remove packages that are in stack_decision
-- Every pip3 install line must include --break-system-packages on Ubuntu base images
-- ENV LD_LIBRARY_PATH must NOT self-reference $LD_LIBRARY_PATH
-- Do NOT include markdown code fences or any text outside the JSON
+
+install.sh rules:
+- Start with: #!/bin/bash\\nset -e
+- Use $CONDA_PREFIX for install prefix and library paths (it is set inside conda run)
+- For LAMMPS source builds: download tarball → cmake with -DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX -DCMAKE_PREFIX_PATH=$CONDA_PREFIX → make -j$(nproc) → make install → pip install python binding
+- For any pip install inside install.sh: use pip install (no --break-system-packages needed in conda env)
+- Set LD_LIBRARY_PATH=$CONDA_PREFIX/lib after building source libraries
+- Return empty string "" if stack_decision has no special_installs
 
 HANDLING ORCHESTRATOR FEEDBACK:
-If the input ends with "Orchestrator feedback", a previous Dockerfile was rejected. Fix every issue raised. Do not remove packages that were already correct.\
+If the input ends with "Orchestrator feedback", fix every issue raised. Do not remove packages that were already correct.\
 """
 
 CODEGEN_PROMPT = """\
@@ -217,43 +243,42 @@ Return ONLY a valid JSON object with exactly these keys:
 # __ Project layout (injected into codegen context) ____________________________
 
 PROJECT_LAYOUT = """\
-Repo directory tree — the repo root is always mounted at /app inside every container:
+Repo directory tree — host filesystem (no container). All paths are real host paths:
 
-/app/                                  ← repo root
+<repo_root>/                           ← os.path.dirname(os.path.abspath(__file__))
 ├── agent.py
-├── Dockerfile                         ← agent container image definition
 ├── requirements.txt
 ├── .env
 ├── data/
-│   ├── in.watbox                      ← LAMMPS input script
-│   ├── data.init                      ← LAMMPS initial atom positions
-│   └── AW.tersoff                     ← LAMMPS force field parameters
+│   └── <user data files>
 ├── Literature/
 │   └── *.pdf
+├── work/
+│   └── run_YYYYMMDD_HHMMSS/           ← per-run output directory (created by executor)
+│       ├── data/                      ← staged copy of user-selected data files
+│       └── <workflow output files>
 └── builds/                            ← ALL generated files land here
-    ├── Dockerfile                     ← sandbox image definition (generated by installer)
-    ├── workflow.py                    ← Parsl workflow script (generated by codegen)
+    ├── environment.yml                ← conda env spec (generated by installer)
+    ├── install.sh                     ← special installs script (generated by installer)
+    ├── workflow.py                    ← workflow script (generated by codegen)
     └── run_workflow.sh                ← launcher script (generated by codegen)
 
-Absolute paths inside any container (agent or sandbox):
-  LAMMPS input script : /app/data/in.watbox
-  LAMMPS data files   : /app/data/data.init  and  /app/data/AW.tersoff
-  workflow.py         : /app/builds/workflow.py
-  run_workflow.sh     : /app/builds/run_workflow.sh
-  work output dir     : /app/work/run0  (created at runtime)
+The workflow runs natively via conda run — NO Docker container, NO /app/ paths.
+Paths in workflow.py are real host paths passed as command-line arguments:
+  --data-dir  absolute host path to the staged data dir for this run
+  --work-dir  absolute host path to the run output directory
 
-run_workflow.sh is at /app/builds/run_workflow.sh.
-It must mount the REPO ROOT (one level above builds/) into the sandbox at /app.
-Resolve paths like this — never use $(pwd):
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # /app/builds
-  REPO_DIR="$(dirname "$SCRIPT_DIR")"                           # /app
-  docker run --rm -v "$REPO_DIR":/app -w /app/builds "$IMAGE" python3 /app/builds/workflow.py ...\
+workflow.py MUST accept --data-dir and --work-dir as argparse arguments and use them
+for ALL file I/O. Do NOT hardcode /app/ or any container path anywhere.
+
+run_workflow.sh must use conda run to execute the workflow. Resolve its own absolute
+path with BASH_SOURCE — never use pwd. Example:
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  REPO_DIR="$(dirname "$SCRIPT_DIR")"
+  conda run -n maw_sandbox --no-capture-output python3 "$SCRIPT_DIR/workflow.py" \\
+    --data-dir "$REPO_DIR/work/run_YYYYMMDD_HHMMSS/data" \\
+    --work-dir "$REPO_DIR/work/run_YYYYMMDD_HHMMSS"\
 """
-
-# Host-side repo path for Docker bind mounts.
-# Inside the agent container __file__ resolves to /app; the HOST Docker daemon
-# needs the real host path so volume mounts on the sandbox container work correctly.
-HOST_REPO_PATH = os.environ.get("HOST_REPO_PATH", os.path.dirname(os.path.abspath(__file__)))
 
 # __ Structured output helper __________________________________________________
 
@@ -337,11 +362,14 @@ def orchestrator(state: AgentState) -> dict:
     if state.get("tasks"):
         parts.append(f"Tasks ({len(state['tasks'])}):\n" +
                      "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
-    if state.get("dockerfile"):
-        parts.append(f"Dockerfile:\n{state['dockerfile']}")
+    if state.get("environment_yml"):
+        spec_display = f"environment.yml:\n{state['environment_yml']}"
+        if state.get("install_script"):
+            spec_display += f"\n\ninstall.sh (first 40 lines):\n" + "\n".join(state["install_script"].splitlines()[:40])
+        parts.append(spec_display)
     if state.get("code_output"):
         parts.append(f"Code output (latest):\n{state['code_output'][-1]}")
-    if state.get("execution_output") and state.get("current_step") != "installer_dockerfile_pending_approval":
+    if state.get("execution_output") and state.get("current_step") != "installer_env_spec_pending_approval":
         parts.append(f"Execution output (latest):\n{state['execution_output'][-1]}")
     if state.get("build_error"):
         parts.append(f"Build error (attempt {state.get('build_attempt', 0)}):\n{state['build_error']}")
@@ -372,16 +400,16 @@ def orchestrator(state: AgentState) -> dict:
             ])
 
     # Hard overrides: lock routing at deterministic transition points
-    if state.get("current_step") == "installer_dockerfile_pending_approval":
+    if state.get("current_step") == "installer_env_spec_pending_approval":
         result.next = "installer"
     elif state.get("current_step") == "installer_complete":
         result.next = "codegen"
     elif state.get("current_step") == "installer_build_failed":
         attempt = state.get("build_attempt", 0)
-        console.print(f"[yellow][orchestrator] docker build failed (attempt {attempt}) — sending back to installer[/yellow]")
+        console.print(f"[yellow][orchestrator] conda env build failed (attempt {attempt}) — sending back to installer[/yellow]")
         result.next = "installer"
         if not result.feedback:
-            result.feedback = f"The docker build failed. Error output:\n{state.get('build_error', '')}\nFix the Dockerfile to resolve this error."
+            result.feedback = f"The conda environment build failed. Error output:\n{state.get('build_error', '')}\nFix the environment.yml or install.sh to resolve this error."
 
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
@@ -401,7 +429,7 @@ def orchestrator(state: AgentState) -> dict:
 
     already_ran = {
         "planner":   bool(state.get("literature_findings")),
-        "installer": bool(state.get("dockerfile")),
+        "installer": bool(state.get("environment_yml")),
         "codegen":   bool(state.get("code_output")),
         "executor":  bool(state.get("execution_output")),
     }
@@ -414,7 +442,7 @@ def orchestrator(state: AgentState) -> dict:
     return {
         "next":                  result.next,
         "orchestrator_feedback": result.feedback,
-        "dockerfile_approved":   result.dockerfile_approved,
+        "env_spec_approved":     result.env_spec_approved,
         "current_step":          f"orchestrator_routed_to_{result.next}",
         **revision_update,
     }
@@ -453,7 +481,7 @@ def planner(state: AgentState) -> dict:
                         _expanded_files.append(_rel.replace(os.sep, "/"))
             else:
                 _expanded_files.append(_name)
-        _files_section = (f"\n\nAvailable data files (in /app/data/): {', '.join(_expanded_files)}"
+        _files_section = (f"\n\nAvailable data files (passed as --data-dir to workflow): {', '.join(_expanded_files)}"
                           if _expanded_files else "")
         _human = f"Goal: {state['goal']}{_files_section}\n\nPaper:\n{pdf_text}{feedback_section}"
 
@@ -508,60 +536,57 @@ def planner(state: AgentState) -> dict:
 
 def installer(state: AgentState) -> dict:
     try:
-        build_dir       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
+        import hashlib, shutil, sys as _sys
+        build_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "builds")
         os.makedirs(build_dir, exist_ok=True)
-        dockerfile_path = os.path.join(build_dir, "Dockerfile")
-        image_tag       = "maw-sandbox:latest"
+        env_yml_path    = os.path.join(build_dir, "environment.yml")
+        install_sh_path = os.path.join(build_dir, "install.sh")
+        conda_env_name  = state.get("conda_env_name") or "maw_sandbox"
 
-        if state.get("dockerfile_approved"):
-            # ── Phase 2: Dockerfile approved — build the image ───────────────
-            import shutil, hashlib
-            docker_available = shutil.which("docker") is not None
-
-            if not docker_available:
+        if state.get("env_spec_approved"):
+            # ── Phase 2: spec approved — create/update conda env ─────────────
+            conda_bin = shutil.which("conda")
+            if not conda_bin:
                 console.print(
-                    "[yellow][installer] docker not found. "
-                    "Skipping image build — Dockerfile written. "
-                    "Run 'docker build -t maw-sandbox:latest -f builds/Dockerfile .' to build.[/yellow]"
+                    "[yellow][installer] conda not found in PATH. "
+                    "Skipping env build — files written. "
+                    f"Run 'conda env create -n {conda_env_name} -f builds/environment.yml' to build.[/yellow]"
                 )
-                return {
-                    "image_tag":    image_tag,
-                    "current_step": "installer_complete",
-                }
+                return {"current_step": "installer_complete"}
 
-            # ── skip rebuild if Dockerfile unchanged and image already exists ─
-            hash_file = os.path.join(build_dir, ".dockerfile_hash")
-            with open(dockerfile_path) as f:
-                current_content = f.read()
-            current_hash = hashlib.md5(current_content.encode()).hexdigest()
+            # ── skip rebuild if spec unchanged and env already exists ─────────
+            hash_file = os.path.join(build_dir, ".env_spec_hash")
+            with open(env_yml_path) as f:
+                _yml_content = f.read()
+            _install_content = ""
+            if os.path.isfile(install_sh_path):
+                with open(install_sh_path) as f:
+                    _install_content = f.read()
+            current_hash = hashlib.md5((_yml_content + _install_content).encode()).hexdigest()
 
-            image_exists = subprocess.run(
-                ["docker", "inspect", image_tag], capture_output=True,
-            ).returncode == 0
+            env_exists = conda_env_name in subprocess.run(
+                [conda_bin, "env", "list"], capture_output=True, text=True
+            ).stdout
 
             stored_hash = ""
             if os.path.isfile(hash_file):
                 with open(hash_file) as f:
                     stored_hash = f.read().strip()
 
-            if current_hash == stored_hash and image_exists:
-                console.print("[dim cyan][installer] Dockerfile unchanged and image exists — skipping rebuild[/dim cyan]")
-                return {
-                    "image_tag":    image_tag,
-                    "current_step": "installer_complete",
-                }
+            if current_hash == stored_hash and env_exists:
+                console.print(f"[dim cyan][installer] env spec unchanged and '{conda_env_name}' exists — skipping rebuild[/dim cyan]")
+                return {"current_step": "installer_complete"}
 
-            console.print("[dim cyan][installer] Dockerfile approved — building Docker image (this may take several minutes)...[/dim cyan]")
+            # ── create or update env ──────────────────────────────────────────
+            if env_exists:
+                console.print(f"[dim cyan][installer] updating conda env '{conda_env_name}'...[/dim cyan]")
+                cmd_env = [conda_bin, "env", "update", "-n", conda_env_name, "--file", env_yml_path, "--prune"]
+            else:
+                console.print(f"[dim cyan][installer] creating conda env '{conda_env_name}' (this may take several minutes)...[/dim cyan]")
+                cmd_env = [conda_bin, "env", "create", "-n", conda_env_name, "--file", env_yml_path]
 
-            import sys as _sys
-            build_context = os.path.dirname(os.path.abspath(__file__))
-            proc = subprocess.Popen(
-                ["docker", "build", "--network=host", "-t", image_tag, "-f", dockerfile_path, build_context],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
             _build_lines = []
+            proc = subprocess.Popen(cmd_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for _line in proc.stdout:
                 _sys.stdout.write(_line)
                 _sys.stdout.flush()
@@ -570,58 +595,57 @@ def installer(state: AgentState) -> dict:
 
             if proc.returncode != 0:
                 _error_tail = "".join(_build_lines[-80:])
-                console.print(f"[red][installer] docker build failed (exit {proc.returncode}) — returning to orchestrator for diagnosis[/red]")
+                console.print(f"[red][installer] conda env create failed (exit {proc.returncode}) — returning to orchestrator[/red]")
                 return {
-                    "current_step":      "installer_build_failed",
-                    "build_error":       f"docker build exit {proc.returncode}. Last output:\n{_error_tail}",
-                    "build_attempt":     state.get("build_attempt", 0) + 1,
-                    "dockerfile_approved": False,
+                    "current_step":    "installer_build_failed",
+                    "build_error":     f"conda env create exit {proc.returncode}. Last output:\n{_error_tail}",
+                    "build_attempt":   state.get("build_attempt", 0) + 1,
+                    "env_spec_approved": False,
                 }
+
+            # ── run install.sh inside the new env (special installs) ──────────
+            install_content = state.get("install_script", "").strip()
+            if install_content and install_content not in ("", "#!/bin/bash\nset -e"):
+                console.print(f"[dim cyan][installer] running install.sh in conda env '{conda_env_name}'...[/dim cyan]")
+                _sh_lines = []
+                sh_proc = subprocess.Popen(
+                    [conda_bin, "run", "-n", conda_env_name, "--no-capture-output", "bash", install_sh_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                for _line in sh_proc.stdout:
+                    _sys.stdout.write(_line)
+                    _sys.stdout.flush()
+                    _sh_lines.append(_line)
+                sh_proc.wait()
+
+                if sh_proc.returncode != 0:
+                    _error_tail = "".join(_sh_lines[-80:])
+                    console.print(f"[red][installer] install.sh failed (exit {sh_proc.returncode}) — returning to orchestrator[/red]")
+                    return {
+                        "current_step":    "installer_build_failed",
+                        "build_error":     f"install.sh exit {sh_proc.returncode}. Last output:\n{_error_tail}",
+                        "build_attempt":   state.get("build_attempt", 0) + 1,
+                        "env_spec_approved": False,
+                    }
 
             with open(hash_file, "w") as f:
                 f.write(current_hash)
 
-            console.print(f"[dim cyan][installer] image built: {image_tag}[/dim cyan]")
-
-            # ── Export Docker image as tar for LCRC/Singularity transfer ────
-            tar_path = os.path.join(build_dir, "maw-sandbox.tar")
-            console.print(f"[dim cyan][installer] exporting Docker image to {tar_path} for Singularity transfer...[/dim cyan]")
-            _tar_proc = subprocess.Popen(
-                ["docker", "save", "-o", tar_path, image_tag],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for _line in _tar_proc.stdout:
-                _sys.stdout.write(_line)
-                _sys.stdout.flush()
-            _tar_proc.wait()
-            if _tar_proc.returncode == 0:
-                console.print(
-                    f"[dim cyan][installer] image exported: {tar_path}\n"
-                    f"  On LCRC: singularity build maw-sandbox.sif docker-archive://maw-sandbox.tar[/dim cyan]"
-                )
-            else:
-                console.print(f"[yellow][installer] docker save failed — image still available locally as {image_tag}[/yellow]")
-
-            return {
-                "image_tag":    image_tag,
-                "current_step": "installer_complete",
-            }
+            console.print(f"[dim cyan][installer] conda env '{conda_env_name}' ready[/dim cyan]")
+            return {"current_step": "installer_complete"}
 
         else:
-            # ── Phase 1: generate Dockerfile from stack_decision via LLM ──
-            console.print("\n[dim cyan][installer] generating Dockerfile from stack_decision...[/dim cyan]")
+            # ── Phase 1: generate environment.yml + install.sh via LLM ───────
+            console.print("\n[dim cyan][installer] generating conda env spec from stack_decision...[/dim cyan]")
 
             stack = state.get("stack_decision", {})
             if not stack:
                 raise ValueError("stack_decision is empty — planner must run before installer")
 
             feedback = state.get("orchestrator_feedback", "")
-            feedback_section = (f"\n\nOrchestrator feedback — fix these issues in your revised Dockerfile:\n{feedback}"
+            feedback_section = (f"\n\nOrchestrator feedback — fix these issues in your revised spec:\n{feedback}"
                                 if feedback else "")
 
-            # Build system prompt: base skill + use-case skill (auto-detected from stack)
             _base = _read_skill("agents/installer")
             _special_names = [s.get("name", "").lower() for s in stack.get("special_installs", [])]
             _pip_names      = [p.lower() for p in stack.get("pip_packages", [])]
@@ -643,66 +667,34 @@ def installer(state: AgentState) -> dict:
                 HumanMessage(content=_human),
             ])
 
-            dockerfile = result.dockerfile_content
+            env_yml    = result.environment_yml.strip()
+            install_sh = result.install_script.strip()
 
-            # ── Platform guardrails (non-negotiable, applied in code) ────────
-            import re as _re
+            # Ensure install.sh has a proper shebang + set -e header
+            if install_sh and not install_sh.startswith("#!"):
+                install_sh = "#!/bin/bash\nset -e\n" + install_sh
 
-            # Normalise pip3 install lines: strip malformed --break-system-package variants,
-            # remove pip self-upgrade (fails on Ubuntu 24.04), re-add flag exactly once.
-            # Flag must appear before any trailing && continuation, not after it.
-            def fix_pip_line(line: str) -> str:
-                if 'pip3' not in line and 'pip ' not in line:
-                    return line
-                if _re.search(r'pip3?\s+install\b.*--upgrade\s+pip\b', line):
-                    return ''
-                if _re.search(r'pip3?\s+install\b.*\bupgrade\b.*\bpip\b', line):
-                    return ''
-                cleaned = _re.sub(r'[ \t]+--break-system-package[s]*', '', line)
-                if not _re.search(r'pip3?\s+install\b', cleaned):
-                    return cleaned
-                # Find trailing continuation operator (&&, && \) and insert flag before it.
-                # Handles: pip3 install . && \ --break-system-packages  (LLM misplacement)
-                # Produces: pip3 install . --break-system-packages && \
-                stripped = cleaned.rstrip()
-                cont = _re.search(r'(\s*&&\s*\\?\s*|\s+\\)$', stripped)
-                if cont:
-                    base = stripped[:cont.start()].rstrip()
-                    return base + ' --break-system-packages' + cont.group(0)
-                return stripped + ' --break-system-packages'
+            with open(env_yml_path, "w") as f:
+                f.write(env_yml)
+            if install_sh:
+                with open(install_sh_path, "w") as f:
+                    f.write(install_sh)
+            elif os.path.isfile(install_sh_path):
+                os.remove(install_sh_path)
 
-            dockerfile = '\n'.join(
-                l for l in (fix_pip_line(l) for l in dockerfile.splitlines())
-                if l is not None
-            )
-
-            # If stack_decision includes the pip lammps wheel (not a no-MPI source build),
-            # inject the libmpi.so.12 symlink guard — the pip wheel links against .so.12
-            # but Ubuntu 24.04 ships .so.40. Skip for no_mpi source builds: no MPI libs
-            # are installed so find returns empty and the ln command crashes the build.
-            if any("lammps" in x and "no_mpi" not in x for x in _special_names):
-                MPI_SYMLINK = (
-                    'RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v cxx | sort | tail -1) && '
-                    'MPI_DIR=$(dirname "$MPI_SO") && '
-                    'ln -sf "$MPI_SO" "$MPI_DIR/libmpi.so.12" && '
-                    'ldconfig'
-                )
-                if 'libmpi.so.12' not in dockerfile and 'WORKDIR' in dockerfile:
-                    dockerfile = dockerfile.replace('WORKDIR', MPI_SYMLINK + '\n\nWORKDIR', 1)
-                    console.print("[dim cyan][installer] injected libmpi.so.12 symlink[/dim cyan]")
-
-            with open(dockerfile_path, "w") as f:
-                f.write(dockerfile)
-
+            display = env_yml
+            if install_sh:
+                display += f"\n\n--- install.sh ---\n{install_sh}"
             console.print(Panel(
-                dockerfile,
-                title="[bold yellow]Dockerfile — Pending Orchestrator Approval[/bold yellow]",
+                display,
+                title="[bold yellow]Conda Env Spec — Pending Orchestrator Approval[/bold yellow]",
                 border_style="yellow",
             ))
 
             return {
-                "dockerfile":   dockerfile,
-                "current_step": "installer_dockerfile_pending_approval",
+                "environment_yml": env_yml,
+                "install_script":  install_sh,
+                "current_step":    "installer_env_spec_pending_approval",
             }
 
     except Exception as e:
@@ -718,13 +710,13 @@ def codegen(state: AgentState) -> dict:
         feedback_section = (f"\n\nOrchestrator feedback — fix these issues in your new code:\n{feedback}"
                             if feedback else "")
 
-        image_tag = state.get("image_tag", "maw-sandbox:latest")
+        conda_env = state.get("conda_env_name") or "maw_sandbox"
 
         context = (
             f"Project layout:\n{PROJECT_LAYOUT}" +
             "\n\nLiterature findings:\n" + "\n".join(f"  - {f}" for f in state.get("literature_findings", [])) +
             "\n\nTasks to implement:\n" + "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state.get("tasks", []))) +
-            f"\n\nDocker image tag: {image_tag}" +
+            f"\n\nConda environment name: {conda_env}" +
             feedback_section
         )
 
@@ -784,72 +776,60 @@ def codegen(state: AgentState) -> dict:
 
 def executor(state: AgentState) -> dict:
     try:
-        console.print("\n[dim cyan][executor] running workflow in Docker container...[/dim cyan]")
+        import shutil as _shutil
+        console.print("\n[dim cyan][executor] running workflow via conda run...[/dim cyan]")
 
         repo_dir    = os.path.dirname(os.path.abspath(__file__))
         build_dir   = os.path.join(repo_dir, "builds")
         workflow_py = os.path.join(build_dir, "workflow.py")
-        image_tag   = state.get("image_tag") or "maw-sandbox:latest"
+        conda_env   = state.get("conda_env_name") or "maw_sandbox"
+        conda_bin   = _shutil.which("conda")
 
-        import shutil
-        docker_available = shutil.which("docker") is not None
-
-        if not docker_available:
+        if not conda_bin:
             msg = (
-                "docker not available on this machine. "
-                "To execute the workflow, ensure Docker is installed and run:\n"
-                f"  bash builds/run_workflow.sh {image_tag}"
+                "conda not found in PATH. "
+                f"To execute manually: conda run -n {conda_env} python3 builds/workflow.py ..."
             )
             console.print(f"[yellow][executor] {msg}[/yellow]")
-            output = f"SKIPPED (no docker): {msg}"
             return {
-                "execution_output": [output],
+                "execution_output": [f"SKIPPED (no conda): {msg}"],
                 "current_step":     "executor_complete",
             }
 
         if not os.path.isfile(workflow_py):
             raise FileNotFoundError(f"workflow.py not found at {workflow_py}. Run codegen first.")
 
-        # Unique timestamped directory for this run — never overwrites previous results
-        run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_dir = f"run_{run_id}"
-        work_dir_host    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work", run_dir)
-        work_dir_container = f"/app/work/{run_dir}"
-        os.makedirs(work_dir_host, exist_ok=True)
+        # Unique timestamped run directory — never overwrites previous results
+        run_id       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir_name = f"run_{run_id}"
+        work_dir     = os.path.join(repo_dir, "work", run_dir_name)
+        os.makedirs(work_dir, exist_ok=True)
 
-        # Stage only user-selected data files into a per-run directory.
-        # This is what gets mounted as /app/data in the sandbox — nothing else.
-        import shutil as _shutil
-        data_staging_host = os.path.join(work_dir_host, "data")
-        os.makedirs(data_staging_host, exist_ok=True)
-        _src_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        # Stage user-selected data files into a per-run data subdirectory
+        data_staging = os.path.join(work_dir, "data")
+        os.makedirs(data_staging, exist_ok=True)
+        src_data_dir = os.path.join(repo_dir, "data")
         for _fname in state.get("data_files", []):
-            _src = os.path.join(_src_data_dir, _fname)
+            _src = os.path.join(src_data_dir, _fname)
             if os.path.isdir(_src):
-                _shutil.copytree(_src, os.path.join(data_staging_host, _fname), dirs_exist_ok=True)
+                _shutil.copytree(_src, os.path.join(data_staging, _fname), dirs_exist_ok=True)
             elif os.path.isfile(_src):
-                _shutil.copy2(_src, os.path.join(data_staging_host, _fname))
-        data_staging_container = f"{HOST_REPO_PATH}/work/{run_dir}/data"
+                _shutil.copy2(_src, os.path.join(data_staging, _fname))
         console.print(f"[dim cyan][executor] staged data files: {state.get('data_files', [])}[/dim cyan]")
 
-        _env_vars = state.get("stack_decision", {}).get("env_vars", {})
-        _env_flags = []
-        for _k, _v in _env_vars.items():
-            _env_flags += ["-e", f"{_k}={_v}"]
+        # Build subprocess env: inherit everything, then overlay stack_decision env_vars
+        _run_env = os.environ.copy()
+        for _k, _v in state.get("stack_decision", {}).get("env_vars", {}).items():
+            _run_env[_k] = _v
 
         cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{HOST_REPO_PATH}:/app",
-            "-v", f"{data_staging_container}:/app/data",
-            "-w", "/app/builds",
-            *_env_flags,
-            image_tag,
-            "python3", "workflow.py",
-            "--data-dir", "/app/data",
-            "--work-dir", work_dir_container,
+            conda_bin, "run", "-n", conda_env, "--no-capture-output",
+            "python3", workflow_py,
+            "--data-dir", data_staging,
+            "--work-dir", work_dir,
         ]
 
-        console.print(f"[dim cyan][executor] run directory: work/{run_dir}[/dim cyan]")
+        console.print(f"[dim cyan][executor] run directory: work/{run_dir_name}[/dim cyan]")
         console.print(f"[dim cyan][executor] command: {' '.join(cmd)}[/dim cyan]")
         console.print("[dim cyan][executor] this may take several minutes...[/dim cyan]")
 
@@ -858,6 +838,7 @@ def executor(state: AgentState) -> dict:
             capture_output=True,
             text=True,
             timeout=3600,
+            env=_run_env,
         )
 
         stdout = proc.stdout.strip()
@@ -868,15 +849,14 @@ def executor(state: AgentState) -> dict:
             f"=== STDERR ===\n{stderr}"
         )
 
-        # Save metadata alongside outputs for later analysis
         metadata = {
-            "run_id":           run_id,
-            "goal":             state.get("goal", ""),
-            "paper":            state.get("pdf_path", ""),
-            "timestamp":        datetime.now().isoformat(),
-            "exit_code":        proc.returncode,
-            "image_tag":        image_tag,
-            "stack_decision":   state.get("stack_decision", {}),
+            "run_id":         run_id,
+            "goal":           state.get("goal", ""),
+            "paper":          state.get("pdf_path", ""),
+            "timestamp":      datetime.now().isoformat(),
+            "exit_code":      proc.returncode,
+            "conda_env":      conda_env,
+            "stack_decision": state.get("stack_decision", {}),
             "revisions": {
                 "planner":   state.get("planner_revisions",   0),
                 "installer": state.get("installer_revisions", 0),
@@ -884,7 +864,7 @@ def executor(state: AgentState) -> dict:
                 "executor":  state.get("executor_revisions",  0),
             },
         }
-        with open(os.path.join(work_dir_host, "run_metadata.json"), "w") as f:
+        with open(os.path.join(work_dir, "run_metadata.json"), "w") as f:
             json.dump(metadata, f, indent=2)
 
         color = "green" if proc.returncode == 0 else "red"
@@ -897,7 +877,7 @@ def executor(state: AgentState) -> dict:
         if proc.returncode != 0:
             console.print(f"[red][executor] workflow exited with code {proc.returncode}[/red]")
         else:
-            console.print(f"[dim cyan][executor] workflow completed successfully — outputs in work/{run_dir}[/dim cyan]")
+            console.print(f"[dim cyan][executor] workflow completed successfully — outputs in work/{run_dir_name}[/dim cyan]")
 
         return {
             "execution_output": [combined],
@@ -944,7 +924,7 @@ def skill_updater(state: AgentState) -> dict:
             f"Literature findings count: {len(state.get('literature_findings', []))}\n"
             f"Tasks count: {len(state.get('tasks', []))}\n"
             f"Stack decision: {json.dumps(state.get('stack_decision', {}), indent=2)}\n"
-            f"Docker image tag: {state.get('image_tag') or 'maw-sandbox:latest'}\n"
+            f"Conda env: {state.get('conda_env_name') or 'maw_sandbox'}\n"
             f"{exit_code_line}\n\n"
             f"Execution output (truncated):\n{execution_tail}"
         )
@@ -1191,9 +1171,10 @@ if __name__ == "__main__":
         "tasks":                 [],
         "code_output":           [],
         "execution_output":      [],
-        "dockerfile":            "",
-        "dockerfile_approved":   False,
-        "image_tag":             "",
+        "environment_yml":       "",
+        "install_script":        "",
+        "env_spec_approved":     False,
+        "conda_env_name":        "maw_sandbox",
         "current_step":          "start",
         "orchestrator_feedback": "",
         "next":                  "",

@@ -24,7 +24,8 @@ Load when planning any molecular nucleation or water crystallization workflow. P
 Before extracting anything from the paper, read the goal. The user specifies where the workflow must run. Load the matching knowledge skill and build the entire plan for that environment.
 
 - Goal says "local", "my machine", "Docker" → load `knowledge/local_docker`, plan for serial execution in a Docker container
-- Goal says "HPC", "cluster", "Argonne", "SLURM" → load the appropriate HPC knowledge skill, plan for that environment
+- Goal says "LCRC", "Argonne", "cluster", "Singularity" → load `knowledge/lcrc`, plan for Singularity container execution on LCRC
+- Goal says "HPC", "cluster", "SLURM" (generic, not LCRC) → load the appropriate HPC knowledge skill, plan for that environment
 
 **Do not default to the paper's HPC environment just because that is what the paper describes. Plan for what the user asked for.**
 

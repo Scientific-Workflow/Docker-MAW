@@ -232,7 +232,7 @@ def main():
 ## Edge Cases
 
 - **Stale frames from previous run:** If `work/run0/frames/` already has `.lammpstrj` files, OVITO reads those instead of running fresh. Codegen should not handle this — user must delete `work/` before re-running.
-- **Old `image_tag` default:** `state.get("image_tag", "maw-sandbox:latest")` returns `""` when key exists. Use `state.get("image_tag") or "maw-sandbox:latest"`.
+- **Conda env name:** The workflow runs in `maw_sandbox` via `conda run`. No Docker image or image_tag involved.
 
 ## Notes
 
