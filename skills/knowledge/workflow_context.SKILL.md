@@ -79,15 +79,9 @@ repo root (HOST_REPO_PATH on host, /app in containers)
 
 ---
 
-## Single-Node, No-HPC Constraint
+## Execution Environment
 
-All workflows in MAW run on a single developer machine inside a Docker container. There is:
-- No SLURM, no PBS, no job scheduler
-- No MPI network fabric across nodes
-- No shared filesystem between nodes
-- No GPU (unless explicitly added to the Dockerfile)
-
-This means: do not recommend MPI, mpirun, multi-node Parsl configs, or any HPC-specific tools. Use serial or thread-parallel single-process approaches.
+MAW workflows run inside Docker containers. The container may run on a local machine or on an HPC node — in either case, the container is an isolated single-node environment. Execution environment constraints (what tools work, what the Dockerfile needs, how to translate HPC paper requirements) are defined in the knowledge skill loaded by the planner based on the user's goal. See `skills/knowledge/` for environment-specific guidance.
 
 ---
 

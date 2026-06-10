@@ -1,0 +1,57 @@
+{
+  "run_id": "20260609_194203",
+  "goal": "Reproduce the water crystallization workflow locally using Docker for my local machine",
+  "paper": "/app/Literature/cise-article-YILDIZ.pdf",
+  "timestamp": "2026-06-09T19:45:30.334264",
+  "exit_code": 0,
+  "image_tag": "maw-sandbox:latest",
+  "stack_decision": {
+    "base_image": "ubuntu:24.04",
+    "apt_packages": [
+      "python3",
+      "python3-pip",
+      "python3-dev",
+      "build-essential",
+      "cmake",
+      "wget",
+      "git",
+      "libfftw3-dev",
+      "libpng-dev",
+      "libjpeg-dev",
+      "zlib1g-dev",
+      "libosmesa6",
+      "libgl1",
+      "libegl1",
+      "libopengl0",
+      "libglib2.0-0",
+      "libxkbcommon0",
+      "libdbus-1-3"
+    ],
+    "pip_packages": [
+      "ovito",
+      "parsl>=2024.0.0",
+      "numpy",
+      "matplotlib",
+      "Pillow"
+    ],
+    "special_installs": [
+      {
+        "name": "lammps_source_build_no_mpi",
+        "reason": "The pip lammps wheel is compiled against OpenMPI and calls MPI_Init on import, which crashes in Docker without a running MPI daemon (ORTE_ERROR_LOG / orte_init failure). Building LAMMPS from source with -DBUILD_MPI=off produces a fully serial Python binding with zero MPI dependency that runs reliably in a container."
+      }
+    ],
+    "env_vars": {
+      "LIBGL_ALWAYS_SOFTWARE": "1",
+      "PYOPENGL_PLATFORM": "osmesa",
+      "OVITO_GUI_MODE": "0",
+      "LD_LIBRARY_PATH": "/usr/local/lib"
+    },
+    "workdir": "/app"
+  },
+  "revisions": {
+    "planner": 0,
+    "installer": 1,
+    "codegen": 0,
+    "executor": 0
+  }
+}

@@ -19,7 +19,7 @@ Loaded on every executor() call.
 
 ## Overview
 
-The executor builds a `docker run` command that mounts the repo root at `/app` and runs `python3 /app/builds/workflow.py` with `--data-dir` and `--work-dir` arguments. Returns the full stdout/stderr and exit code in `execution_output`.
+The executor builds a `docker run` command that mounts the repo root at `/app` and runs `python3 /app/builds/workflow.py` with `--data-dir` and `--work-dir` arguments. Each run gets a unique timestamped directory (`work/run_YYYYMMDD_HHMMSS/`) so results are never overwritten. Returns the full stdout/stderr and exit code in `execution_output`.
 
 ---
 
@@ -35,13 +35,14 @@ Use `or` not `.get(..., default)` — the key exists but may be empty string.
 
 ### Step 2: Build and run docker command
 
+Read environment variables from `state["stack_decision"]["env_vars"]` and pass each as a `-e KEY=VALUE` flag. Do not hardcode env vars — they come from what the planner specified.
+
 ```bash
 docker run --rm \
   -v "$HOST_REPO_PATH":/app \
   -w /app/builds \
-  -e LIBGL_ALWAYS_SOFTWARE=1 \
-  -e PYOPENGL_PLATFORM=osmesa \
-  -e OVITO_GUI_MODE=0 \
+  -e KEY1=VALUE1 \
+  -e KEY2=VALUE2 \
   <image_tag> \
   python3 /app/builds/workflow.py \
   --data-dir /app/data \

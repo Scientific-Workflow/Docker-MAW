@@ -38,14 +38,17 @@ The workflow: LAMMPS runs a water MD simulation → dumps atom trajectories → 
 @python_app
 def run_lammps(input_script, data_dir, work_dir):
     import os, shutil
+    # Parsl workers may not inherit LD_LIBRARY_PATH from the container ENV —
+    # set it explicitly so the source-built liblammps.so is findable.
+    os.environ['LD_LIBRARY_PATH'] = '/usr/local/lib'
     from lammps import lammps
 
     os.makedirs(work_dir, exist_ok=True)
-    for fname in ["data.init", "AW.tersoff"]:
-        shutil.copy2(os.path.join(data_dir, fname), work_dir)
-
-    # ALWAYS copy input script fresh — user may have updated it
-    shutil.copy2(input_script, work_dir)
+    # Copy ALL files from data_dir — do not hardcode filenames
+    for fname in os.listdir(data_dir):
+        src = os.path.join(data_dir, fname)
+        if os.path.isfile(src):
+            shutil.copy2(src, work_dir)
 
     # CRITICAL: chdir into work_dir BEFORE running LAMMPS
     # in.watbox dumps to "frames/" relative to CWD — wrong CWD = frames go nowhere
@@ -59,6 +62,7 @@ def run_lammps(input_script, data_dir, work_dir):
 ```
 
 **Critical rules:**
+- `os.environ['LD_LIBRARY_PATH'] = '/usr/local/lib'` BEFORE `from lammps import lammps` — Parsl workers don't reliably inherit container ENV vars; without this the import fails with `liblammps.so: cannot open shared object file`
 - `os.chdir(work_dir)` BEFORE `lammps()` — this is mandatory
 - Use `shutil.copy2` not `shutil.copy`
 - NEVER modify the input script — do NOT change `run`, `timestep`, `variable T`, or any parameter
@@ -171,7 +175,7 @@ parser.add_argument("--data-dir", default="/app/data")
 parser.add_argument("--work-dir", default="/app/work/run0")
 ```
 
-Input script path = `os.path.join(args.data_dir, "in.watbox")` — derived from data_dir.
+Input script path is determined by the planner from the paper and the available data files list. The planner puts the exact filename in the tasks. Derive it in `main()` as `os.path.join(args.data_dir, "<filename from tasks>")`.
 NO `--input-script` argument. The executor passes ONLY `--data-dir` and `--work-dir`. Any other argument causes "unrecognized arguments" crash.
 
 ### Step 5: main() — chain the apps
@@ -184,7 +188,7 @@ def main():
     parser.add_argument("--work-dir", default="/app/work/run0")
     args = parser.parse_args()
 
-    input_script = os.path.join(args.data_dir, "in.watbox")
+    input_script = os.path.join(args.data_dir, "<input_script_filename>")  # use actual filename from planner tasks
     frames_dir   = run_lammps(input_script, args.data_dir, args.work_dir).result()
     output_csv   = analyze_with_ovito(frames_dir, os.path.join(args.work_dir, "results.csv")).result()
     render_frames(frames_dir, args.work_dir).result()
@@ -233,4 +237,4 @@ def main():
 ## Notes
 
 - The Dockerfile uses source-built LAMMPS (no MPI) — `from lammps import lammps` works without any MPI setup
-- All pip packages available: `lammps`, `ovito`, `parsl>=2024.0.0`, `numpy`, `matplotlib`, `Pillow`
+- Available packages are defined in `stack_decision` from state — do not assume a fixed package list. Check `stack_decision.pip_packages` and `stack_decision.special_installs` before importing anything.

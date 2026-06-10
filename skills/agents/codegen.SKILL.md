@@ -31,6 +31,7 @@ from parsl.providers import LocalProvider
 import parsl
 
 config = Config(
+    run_dir='/tmp/parsl_runinfo',
     executors=[
         HighThroughputExecutor(
             label="local_htex",
@@ -47,7 +48,9 @@ config = Config(
 parsl.load(config)
 ```
 
-**CRITICAL:** Do NOT add `max_workers`, `max_workers_per_node`, or any kwargs not shown. They do not exist in recent Parsl versions and will cause a `TypeError` at startup. Copy this block exactly.
+**CRITICAL — copy this block exactly:**
+- `run_dir='/tmp/parsl_runinfo'` MUST be present — Parsl requires its certificates directory to have `700` permissions. Bind-mounted volumes cannot guarantee this, so `run_dir` must point to a native container path. Omitting this causes `OSError: The certificates directory must be private` at startup.
+- Do NOT add `max_workers`, `max_workers_per_node`, or any kwargs not shown — they do not exist in recent Parsl versions and cause `TypeError` at startup.
 
 ### @python_app Rules
 
@@ -133,7 +136,8 @@ docker run --rm \
 ## Output Rules
 
 - Return ONLY valid JSON with the `"files"` key — no markdown, no code fences, no text outside the JSON
-- Do NOT use conda; all packages are already pip-installed in the container
+- Do NOT use conda
+- Do NOT import packages not listed in `stack_decision.pip_packages` or `stack_decision.special_installs` — if a package is not in the container, the workflow crashes with ModuleNotFoundError
 - `strategy="none"` in Parsl Config is required — prevents auto-scaling issues in local mode
 
 ---

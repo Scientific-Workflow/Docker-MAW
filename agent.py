@@ -7,8 +7,7 @@ from datetime import datetime
 from typing import Annotated, Literal, Sequence
 from typing_extensions import TypedDict
 from pydantic import BaseModel
-from pypdf import PdfReader
-warnings.filterwarnings("ignore", module="pypdf")
+import fitz  # pymupdf
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
@@ -35,8 +34,9 @@ class AgentState(TypedDict):
     messages:              Annotated[Sequence[BaseMessage], add_messages]
     goal:                  str
     pdf_path:              str
+    data_files:            list[str]   # filenames present in data/ at run start
     literature_findings:   list[str]
-    stack_decision:        list[str]
+    stack_decision:        dict   # structured env spec: base_image, apt_packages, pip_packages, special_installs, env_vars, workdir
     tasks:                 list[str]
     code_output:           Annotated[list[str], operator.add]
     execution_output:      Annotated[list[str], operator.add]
@@ -48,6 +48,8 @@ class AgentState(TypedDict):
     next:                  str
     planner_revisions:     int
     installer_revisions:   int
+    build_attempt:         int
+    build_error:           str
     codegen_revisions:     int
     executor_revisions:    int
     skill_update_summary:  str    # summary written by skill_updater after the run
@@ -61,11 +63,23 @@ class OrchestratorOutput(BaseModel):
     dockerfile_approved: bool = False
     skill_requests:      list[str] = []  # e.g. ["use_cases/molecular_nucleation/orchestrator"]
 
+class SpecialInstall(BaseModel):
+    name:   str
+    reason: str
+
+class StackDecision(BaseModel):
+    base_image:        str
+    apt_packages:      list[str]
+    pip_packages:      list[str]
+    special_installs:  list[SpecialInstall] = []
+    env_vars:          dict[str, str] = {}
+    workdir:           str = "/app"
+
 class PlannerOutput(BaseModel):
     literature_findings: list[str]
-    stack_decision:      list[str]
+    stack_decision:      StackDecision
     tasks:               list[str]
-    skill_requests:      list[str] = []  # e.g. ["use_cases/molecular_nucleation/planner", "systems/parsl"]
+    skill_requests:      list[str] = []  # e.g. ["knowledge/local_docker", "use_cases/molecular_nucleation/planner"]
 
 class CodeFile(BaseModel):
     filename: str
@@ -90,6 +104,9 @@ class SkillUpdaterOutput(BaseModel):
 
 # __ Agent Prompts _____________________________________________________________
 
+
+
+
 ORCHESTRATOR_SYSTEM_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
 
@@ -107,9 +124,12 @@ Your agent skill file contains your full operating instructions. Follow them.
 
 Return ONLY a valid JSON object with exactly these keys:
 - literature_findings: list[str] — specific, quantitative facts extracted from the paper
-- stack_decision:      list[str] — packages available in the sandbox Dockerfile only
+- stack_decision:      object — complete environment specification with fields: base_image (str), apt_packages (list[str]), pip_packages (list[str]), special_installs (list of {name, reason}), env_vars (dict), workdir (str)
 - tasks:               list[str] — ordered, Python-API-level implementation steps
 - skill_requests:      list[str] — skill paths to load (first call only; empty on subsequent calls)
+
+stack_decision MUST be a structured object — not a flat list of package names.
+Read the goal to determine the target runtime environment, then load the matching knowledge skill.
 
 No markdown, no code fences, no explanation outside the JSON.
 
@@ -117,67 +137,26 @@ HANDLING ORCHESTRATOR FEEDBACK:
 If the input ends with "Orchestrator feedback", fix every issue raised before returning.\
 """
 
-# INSTALLER_PROMPT = """\
-# You are a Docker environment specialist. Given a list of required software packages and scientific workflow context, generate a valid Dockerfile that installs all dependencies into an Ubuntu 22.04 container.
 
-# Runtime environment: This container runs on a single developer machine NOT an HPC cluster. There is no MPI network fabric, no SLURM, and no multi-node communication. Prefer single-node, serial-friendly package configurations. Avoid HPC-specific MPI setups unless strictly required by the workflow.
+INSTALLER_PROMPT = """\
+Your agent skill file contains your full operating instructions. Follow them.
 
-# Return a JSON object with exactly one key:
-# - dockerfile_content: string — the complete, valid Dockerfile
+You will be given a stack_decision specification produced by the planner. Generate a complete, valid Dockerfile that implements every field in the specification exactly.
 
-# The Dockerfile MUST:
-# 1. Start with: FROM ubuntu:24.04
-#    REASON: Ubuntu 24.04 ships glibc 2.39 and Python 3.12, both required by the OVITO ARM64 wheel.
-#    Do NOT use ubuntu:22.04 — it has glibc 2.35 and Python 3.10, which are incompatible with OVITO on ARM64.
-# 2. Set: ENV DEBIAN_FRONTEND=noninteractive
-# 3. Install system dependencies INCLUDING the OpenMPI runtime shared library:
-#    RUN apt-get update && apt-get install -y python3 python3-pip python3-dev build-essential wget git libosmesa6 libgl1 libglib2.0-0 libopenmpi3 && rm -rf /var/lib/apt/lists/*
-#    NOTE: Ubuntu 24.04 renamed libgl1-mesa-glx to libgl1 and libosmesa6-dev to libosmesa6. Always use libgl1 and libosmesa6 — NOT libgl1-mesa-glx or libosmesa6-dev.
-#    IMPORTANT: libopenmpi3 provides ONLY the shared library (.so file) that the pip lammps wheel links against at runtime.
-#    It does NOT install mpirun or mpiexec. LAMMPS still runs in serial mode via the Python API — not via mpirun.
-#    Without libopenmpi3, the pip lammps wheel will crash with "libmpi.so.12: cannot open shared object file".
-# 4. Upgrade pip: RUN pip3 install --upgrade pip --break-system-packages
-# 5. Install LAMMPS via pip wheel: RUN pip3 install lammps --break-system-packages
-# 6. Install OVITO: RUN pip3 install ovito --break-system-packages
-# 7. Install all other pip-installable packages from the provided stack list, each with --break-system-packages
-# 8. Set working directory: WORKDIR /app
-# 9. Set headless rendering env vars AND the OpenMPI binary path:
-#    ENV LIBGL_ALWAYS_SOFTWARE=1
-#    ENV PYOPENGL_PLATFORM=osmesa
-#    ENV OVITO_GUI_MODE=0
-#    ENV LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
-#    ENV PATH="/usr/lib/openmpi/bin:$PATH"
-#    REASON: On Ubuntu 24.04, openmpi-bin installs orted to /usr/lib/openmpi/bin/ which is NOT in PATH by default.
-#    The pip lammps wheel calls MPI_Init on load; ORTE's singleton mode searches PATH for orted and crashes if not found.
+Return ONLY a valid JSON object with exactly one key:
+- dockerfile_content: str — the complete Dockerfile as a single string with \\n line breaks
 
-# Rules:
-# - ALWAYS install libopenmpi3 AND openmpi-bin AND openmpi-common in the apt-get step.
-#   libopenmpi3 provides the shared library; openmpi-bin provides the orted daemon; openmpi-common provides help files.
-#   Without all three the pip lammps wheel crashes with MPI_Init failure on every run.
-# - ALWAYS set ENV PATH="/usr/lib/openmpi/bin:$PATH" so ORTE can find orted at runtime.
-# - Do NOT install libopenmpi-dev, libmpich-dev, or mpi4py
-# - Do NOT build LAMMPS from source
-# - Do NOT use conda or mamba
-# - Always use --break-system-packages on every pip3 install — Ubuntu 24.04 requires it
-# - Do NOT include markdown code fences or any text outside the JSON
-# - Return ONLY a valid JSON object
+Rules:
+- Implement every field in stack_decision: base_image, apt_packages, pip_packages, special_installs, env_vars, workdir
+- Do NOT add packages not in stack_decision
+- Do NOT remove packages that are in stack_decision
+- Every pip3 install line must include --break-system-packages on Ubuntu base images
+- ENV LD_LIBRARY_PATH must NOT self-reference $LD_LIBRARY_PATH
+- Do NOT include markdown code fences or any text outside the JSON
 
-# EXAMPLE OUTPUT:
-# {
-#   "dockerfile_content": "<complete valid Dockerfile as a single string with \\n line breaks>"
-# }
-
-# ---
-
-# HANDLING ORCHESTRATOR FEEDBACK:
-# If the input ends with a section titled "Orchestrator feedback", it means a previous version of your Dockerfile was rejected. You MUST:
-# 1. Read every point in the feedback carefully — it may flag missing packages, wrong base image, incorrect syntax, or packages that caused runtime errors
-# 2. Fix every issue raised — add missing packages, correct apt-get dependencies, adjust versions
-# 3. Do not remove packages that were already correct — only fix what was flagged
-# 4. Your revised Dockerfile will be reviewed again before the build runs
-
-# Now apply this same structure to the stack and findings provided.\
-# """
+HANDLING ORCHESTRATOR FEEDBACK:
+If the input ends with "Orchestrator feedback", a previous Dockerfile was rejected. Fix every issue raised. Do not remove packages that were already correct.\
+"""
 
 CODEGEN_PROMPT = """\
 Your agent skill file contains your full operating instructions. Follow them.
@@ -342,7 +321,19 @@ def orchestrator(state: AgentState) -> dict:
         parts.append(f"Literature findings ({len(state['literature_findings'])} items):\n" +
                      "\n".join(f"  - {f}" for f in state["literature_findings"]))
     if state.get("stack_decision"):
-        parts.append(f"Stack: {state['stack_decision']}")
+        sd = state["stack_decision"]
+        if isinstance(sd, dict):
+            parts.append(
+                f"Stack decision:\n"
+                f"  base_image: {sd.get('base_image','?')}\n"
+                f"  apt_packages: {sd.get('apt_packages', [])}\n"
+                f"  pip_packages: {sd.get('pip_packages', [])}\n"
+                f"  special_installs: {[s.get('name') for s in sd.get('special_installs', [])]}\n"
+                f"  env_vars: {sd.get('env_vars', {})}\n"
+                f"  workdir: {sd.get('workdir', '?')}"
+            )
+        else:
+            parts.append(f"Stack: {sd}")
     if state.get("tasks"):
         parts.append(f"Tasks ({len(state['tasks'])}):\n" +
                      "\n".join(f"  {i+1}. {t}" for i, t in enumerate(state["tasks"])))
@@ -352,6 +343,8 @@ def orchestrator(state: AgentState) -> dict:
         parts.append(f"Code output (latest):\n{state['code_output'][-1]}")
     if state.get("execution_output") and state.get("current_step") != "installer_dockerfile_pending_approval":
         parts.append(f"Execution output (latest):\n{state['execution_output'][-1]}")
+    if state.get("build_error"):
+        parts.append(f"Build error (attempt {state.get('build_attempt', 0)}):\n{state['build_error']}")
 
     # Build system prompt: base skill + available skill index + core prompt
     _base = _read_skill("agents/orchestrator")
@@ -383,6 +376,12 @@ def orchestrator(state: AgentState) -> dict:
         result.next = "installer"
     elif state.get("current_step") == "installer_complete":
         result.next = "codegen"
+    elif state.get("current_step") == "installer_build_failed":
+        attempt = state.get("build_attempt", 0)
+        console.print(f"[yellow][orchestrator] docker build failed (attempt {attempt}) — sending back to installer[/yellow]")
+        result.next = "installer"
+        if not result.feedback:
+            result.feedback = f"The docker build failed. Error output:\n{state.get('build_error', '')}\nFix the Dockerfile to resolve this error."
 
     panel_body = f"[bold]Routing to:[/bold] [green]{result.next}[/green]\n\n[bold]Reasoning:[/bold]\n{result.reasoning}"
     if result.feedback:
@@ -425,9 +424,10 @@ def planner(state: AgentState) -> dict:
     try:
         console.print("\n[dim cyan][planner] reading PDF...[/dim cyan]")
 
-        reader   = PdfReader(state["pdf_path"])
-        pdf_text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-        console.print(f"[dim cyan][planner] loaded {len(reader.pages)} pages[/dim cyan]")
+        doc      = fitz.open(state["pdf_path"])
+        pdf_text = "\n".join(page.get_text() for page in doc)
+        console.print(f"[dim cyan][planner] loaded {len(doc)} pages[/dim cyan]")
+        doc.close()
 
         feedback = state.get("orchestrator_feedback", "")
         feedback_section = (f"\n\nOrchestrator feedback — address these issues before returning:\n{feedback}"
@@ -441,7 +441,21 @@ def planner(state: AgentState) -> dict:
                   f"\n  use_cases: {_uc}  — request as \"use_cases/<name>/planner\""
                   f"\n  systems:   {_sys}  — request as \"systems/<name>\"") if (_uc or _sys) else ""
         _sys_prompt = (_base + _index + "\n\n---\n\n" + PLANNER_PROMPT) if _base else PLANNER_PROMPT
-        _human = f"Goal: {state['goal']}\n\nPaper:\n{pdf_text}{feedback_section}"
+        _data_files = state.get("data_files", [])
+        _src_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        _expanded_files = []
+        for _name in _data_files:
+            _full = os.path.join(_src_data_dir, _name)
+            if os.path.isdir(_full):
+                for _root, _, _fnames in os.walk(_full):
+                    for _fn in sorted(_fnames):
+                        _rel = os.path.relpath(os.path.join(_root, _fn), _src_data_dir)
+                        _expanded_files.append(_rel.replace(os.sep, "/"))
+            else:
+                _expanded_files.append(_name)
+        _files_section = (f"\n\nAvailable data files (in /app/data/): {', '.join(_expanded_files)}"
+                          if _expanded_files else "")
+        _human = f"Goal: {state['goal']}{_files_section}\n\nPaper:\n{pdf_text}{feedback_section}"
 
         result: PlannerOutput = _invoke_structured(model, PlannerOutput, [
             SystemMessage(content=_sys_prompt),
@@ -460,12 +474,22 @@ def planner(state: AgentState) -> dict:
 
         console.print(f"[dim cyan][planner] produced {len(result.tasks)} tasks[/dim cyan]")
 
-        findings = "\n".join(f"  [cyan]•[/cyan] {f}" for f in result.literature_findings)
-        stack    = "\n".join(f"  [cyan]•[/cyan] {s}" for s in result.stack_decision)
-        tasks    = "\n".join(f"  [bold]{i+1}.[/bold] {t}" for i, t in enumerate(result.tasks))
+        sd = result.stack_decision
+        findings  = "\n".join(f"  [cyan]•[/cyan] {f}" for f in result.literature_findings)
+        stack_lines = [
+            f"  base_image: {sd.base_image}",
+            f"  apt_packages ({len(sd.apt_packages)}): {', '.join(sd.apt_packages)}",
+            f"  pip_packages: {', '.join(sd.pip_packages)}",
+        ]
+        if sd.special_installs:
+            stack_lines.append(f"  special_installs: {', '.join(s.name for s in sd.special_installs)}")
+        if sd.env_vars:
+            stack_lines.append(f"  env_vars: {', '.join(sd.env_vars.keys())}")
+        stack = "\n".join(stack_lines)
+        tasks = "\n".join(f"  [bold]{i+1}.[/bold] {t}" for i, t in enumerate(result.tasks))
         console.print(Panel(
             f"[bold]Literature Findings[/bold]\n{findings}\n\n"
-            f"[bold]Stack[/bold]\n{stack}\n\n"
+            f"[bold]Stack Decision[/bold]\n{stack}\n\n"
             f"[bold]Tasks[/bold]\n{tasks}",
             title="[bold green]Planner Output[/bold green]",
             border_style="green",
@@ -473,7 +497,7 @@ def planner(state: AgentState) -> dict:
 
         return {
             "literature_findings": result.literature_findings,
-            "stack_decision":      result.stack_decision,
+            "stack_decision":      result.stack_decision.model_dump(),
             "tasks":               result.tasks,
             "current_step":        "planner_complete",
         }
@@ -488,22 +512,6 @@ def installer(state: AgentState) -> dict:
         os.makedirs(build_dir, exist_ok=True)
         dockerfile_path = os.path.join(build_dir, "Dockerfile")
         image_tag       = "maw-sandbox:latest"
-
-        # ── Early exit: if the sandbox image already exists, skip installer entirely ──
-        _image_exists = subprocess.run(
-            ["docker", "inspect", image_tag], capture_output=True,
-        ).returncode == 0
-        if _image_exists:
-            console.print("[dim cyan][installer] sandbox image already exists — skipping installer[/dim cyan]")
-            _existing = ""
-            if os.path.isfile(dockerfile_path):
-                with open(dockerfile_path) as _f:
-                    _existing = _f.read()
-            return {
-                "dockerfile":   _existing,
-                "image_tag":    image_tag,
-                "current_step": "installer_complete",
-            }
 
         if state.get("dockerfile_approved"):
             # ── Phase 2: Dockerfile approved — build the image ───────────────
@@ -545,94 +553,143 @@ def installer(state: AgentState) -> dict:
 
             console.print("[dim cyan][installer] Dockerfile approved — building Docker image (this may take several minutes)...[/dim cyan]")
 
+            import sys as _sys
             build_context = os.path.dirname(os.path.abspath(__file__))
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 ["docker", "build", "--network=host", "-t", image_tag, "-f", dockerfile_path, build_context],
-                capture_output=True, text=True,
-                timeout=1800,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
             )
+            _build_lines = []
+            for _line in proc.stdout:
+                _sys.stdout.write(_line)
+                _sys.stdout.flush()
+                _build_lines.append(_line)
+            proc.wait()
 
             if proc.returncode != 0:
-                raise RuntimeError(f"docker build failed (exit {proc.returncode}):\n{proc.stderr[-3000:]}")
+                _error_tail = "".join(_build_lines[-80:])
+                console.print(f"[red][installer] docker build failed (exit {proc.returncode}) — returning to orchestrator for diagnosis[/red]")
+                return {
+                    "current_step":      "installer_build_failed",
+                    "build_error":       f"docker build exit {proc.returncode}. Last output:\n{_error_tail}",
+                    "build_attempt":     state.get("build_attempt", 0) + 1,
+                    "dockerfile_approved": False,
+                }
 
             with open(hash_file, "w") as f:
                 f.write(current_hash)
 
             console.print(f"[dim cyan][installer] image built: {image_tag}[/dim cyan]")
+
+            # ── Export Docker image as tar for LCRC/Singularity transfer ────
+            tar_path = os.path.join(build_dir, "maw-sandbox.tar")
+            console.print(f"[dim cyan][installer] exporting Docker image to {tar_path} for Singularity transfer...[/dim cyan]")
+            _tar_proc = subprocess.Popen(
+                ["docker", "save", "-o", tar_path, image_tag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for _line in _tar_proc.stdout:
+                _sys.stdout.write(_line)
+                _sys.stdout.flush()
+            _tar_proc.wait()
+            if _tar_proc.returncode == 0:
+                console.print(
+                    f"[dim cyan][installer] image exported: {tar_path}\n"
+                    f"  On LCRC: singularity build maw-sandbox.sif docker-archive://maw-sandbox.tar[/dim cyan]"
+                )
+            else:
+                console.print(f"[yellow][installer] docker save failed — image still available locally as {image_tag}[/yellow]")
+
             return {
                 "image_tag":    image_tag,
                 "current_step": "installer_complete",
             }
 
         else:
-            # ── Phase 1: read pre-built Dockerfile from disk, send to orchestrator for approval ──
-            console.print("\n[dim cyan][installer] reading pre-built Dockerfile from disk...[/dim cyan]")
+            # ── Phase 1: generate Dockerfile from stack_decision via LLM ──
+            console.print("\n[dim cyan][installer] generating Dockerfile from stack_decision...[/dim cyan]")
 
-            if not os.path.isfile(dockerfile_path):
-                raise FileNotFoundError(
-                    f"builds/Dockerfile not found at {dockerfile_path}. "
-                    "Place a Dockerfile there before running the agent."
-                )
+            stack = state.get("stack_decision", {})
+            if not stack:
+                raise ValueError("stack_decision is empty — planner must run before installer")
 
-            with open(dockerfile_path) as _f:
-                dockerfile = _f.read()
+            feedback = state.get("orchestrator_feedback", "")
+            feedback_section = (f"\n\nOrchestrator feedback — fix these issues in your revised Dockerfile:\n{feedback}"
+                                if feedback else "")
 
+            # Build system prompt: base skill + use-case skill (auto-detected from stack)
+            _base = _read_skill("agents/installer")
+            _special_names = [s.get("name", "").lower() for s in stack.get("special_installs", [])]
+            _pip_names      = [p.lower() for p in stack.get("pip_packages", [])]
+            _uc = ""
+            if any("lammps" in x for x in _special_names + _pip_names):
+                _uc = _read_skill("use_cases/molecular_nucleation/installer")
+            _sys_prompt = _base
+            if _uc:
+                _sys_prompt += "\n\n---\n\n" + _uc
+            _sys_prompt += "\n\n---\n\n" + INSTALLER_PROMPT
+
+            _human = (
+                f"stack_decision:\n{json.dumps(stack, indent=2)}"
+                f"{feedback_section}"
+            )
+
+            result: InstallerOutput = _invoke_structured(coder_llm, InstallerOutput, [
+                SystemMessage(content=_sys_prompt),
+                HumanMessage(content=_human),
+            ])
+
+            dockerfile = result.dockerfile_content
+
+            # ── Platform guardrails (non-negotiable, applied in code) ────────
             import re as _re
 
-            # 1. Force base image to ubuntu:24.04
-            dockerfile = _re.sub(r'FROM\s+ubuntu:\S+', 'FROM ubuntu:24.04', dockerfile)
-
-            # 2. Clean up any duplicate or malformed --break-system-package(s) flags
-            #    The LLM sometimes generates "--break-system-package --break-system-packagess"
-            #    Normalise every pip3 install line: remove all variants then add one clean copy.
+            # Normalise pip3 install lines: strip malformed --break-system-package variants,
+            # remove pip self-upgrade (fails on Ubuntu 24.04), re-add flag exactly once.
+            # Flag must appear before any trailing && continuation, not after it.
             def fix_pip_line(line: str) -> str:
                 if 'pip3' not in line and 'pip ' not in line:
                     return line
-                # Remove the "upgrade pip" line entirely — on Ubuntu 24.04 it
-                # fails because Debian's pip has no RECORD file and can't be
-                # uninstalled. pip 24.0 ships with the image and is sufficient.
                 if _re.search(r'pip3?\s+install\b.*--upgrade\s+pip\b', line):
                     return ''
                 if _re.search(r'pip3?\s+install\b.*\bupgrade\b.*\bpip\b', line):
                     return ''
-                # Strip all variations of the --break-system-packages flag (including typos)
-                cleaned = _re.sub(r'\s+--break-system-package[s]*', '', line)
-                # Re-add exactly once if this is a pip install line
-                if _re.search(r'pip3?\s+install\b', cleaned):
-                    cleaned = cleaned.rstrip() + ' --break-system-packages'
-                return cleaned
+                cleaned = _re.sub(r'[ \t]+--break-system-package[s]*', '', line)
+                if not _re.search(r'pip3?\s+install\b', cleaned):
+                    return cleaned
+                # Find trailing continuation operator (&&, && \) and insert flag before it.
+                # Handles: pip3 install . && \ --break-system-packages  (LLM misplacement)
+                # Produces: pip3 install . --break-system-packages && \
+                stripped = cleaned.rstrip()
+                cont = _re.search(r'(\s*&&\s*\\?\s*|\s+\\)$', stripped)
+                if cont:
+                    base = stripped[:cont.start()].rstrip()
+                    return base + ' --break-system-packages' + cont.group(0)
+                return stripped + ' --break-system-packages'
 
             dockerfile = '\n'.join(
                 l for l in (fix_pip_line(l) for l in dockerfile.splitlines())
                 if l is not None
             )
 
-            # 3. Inject libmpi.so.12 symlink after libopenmpi3 install.
-            #    The pip lammps wheel is compiled against libmpi.so.12, but
-            #    Ubuntu 24.04 ships libmpi.so.40 via libopenmpi3. We create
-            #    a symlink deterministically so LAMMPS can load at runtime.
-            #    This is injected in code — not left to the LLM — so it is
-            #    always present regardless of what the LLM generates.
-            MPI_SYMLINK = (
-                'RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v cxx | sort | tail -1) && '
-                'MPI_DIR=$(dirname "$MPI_SO") && '
-                'ln -sf "$MPI_SO" "$MPI_DIR/libmpi.so.12" && '
-                'ldconfig'
-            )
-            if 'libmpi.so.12' not in dockerfile:
-                # Insert just before WORKDIR, or append before ENV block
-                if 'WORKDIR' in dockerfile:
-                    dockerfile = dockerfile.replace(
-                        'WORKDIR',
-                        MPI_SYMLINK + '\n\nWORKDIR',
-                        1,
-                    )
-                else:
-                    dockerfile = dockerfile + '\n' + MPI_SYMLINK + '\n'
-                console.print("[dim cyan][installer] injected libmpi.so.12 symlink into Dockerfile[/dim cyan]")
-
-
-            console.print("[dim cyan][installer] applied platform fixes: ubuntu:24.04, --break-system-packages normalised[/dim cyan]")
+            # If stack_decision includes the pip lammps wheel (not a no-MPI source build),
+            # inject the libmpi.so.12 symlink guard — the pip wheel links against .so.12
+            # but Ubuntu 24.04 ships .so.40. Skip for no_mpi source builds: no MPI libs
+            # are installed so find returns empty and the ln command crashes the build.
+            if any("lammps" in x and "no_mpi" not in x for x in _special_names):
+                MPI_SYMLINK = (
+                    'RUN MPI_SO=$(find /usr/lib -name "libmpi.so.*" | grep -v cxx | sort | tail -1) && '
+                    'MPI_DIR=$(dirname "$MPI_SO") && '
+                    'ln -sf "$MPI_SO" "$MPI_DIR/libmpi.so.12" && '
+                    'ldconfig'
+                )
+                if 'libmpi.so.12' not in dockerfile and 'WORKDIR' in dockerfile:
+                    dockerfile = dockerfile.replace('WORKDIR', MPI_SYMLINK + '\n\nWORKDIR', 1)
+                    console.print("[dim cyan][installer] injected libmpi.so.12 symlink[/dim cyan]")
 
             with open(dockerfile_path, "w") as f:
                 f.write(dockerfile)
@@ -642,7 +699,6 @@ def installer(state: AgentState) -> dict:
                 title="[bold yellow]Dockerfile — Pending Orchestrator Approval[/bold yellow]",
                 border_style="yellow",
             ))
-            console.print("[dim yellow][installer] Dockerfile written — waiting for orchestrator approval before building image...[/dim yellow]")
 
             return {
                 "dockerfile":   dockerfile,
@@ -675,9 +731,11 @@ def codegen(state: AgentState) -> dict:
         _base_codegen = _read_skill("agents/codegen")
 
         # Auto-load use-case skill from stack_decision (no skill_requests on CoderOutput)
-        _stack = [p.lower() for p in state.get("stack_decision", [])]
+        _sd = state.get("stack_decision", {})
+        _special_names = [s.get("name", "").lower() for s in _sd.get("special_installs", [])]
+        _pip_names     = [p.lower() for p in _sd.get("pip_packages", [])]
         _uc_codegen = ""
-        if any("lammps" in p for p in _stack):
+        if any("lammps" in x for x in _special_names + _pip_names):
             _uc_codegen = _read_skill("use_cases/molecular_nucleation/codegen")
 
         _codegen_prompt = _base_codegen or ""
@@ -752,19 +810,46 @@ def executor(state: AgentState) -> dict:
         if not os.path.isfile(workflow_py):
             raise FileNotFoundError(f"workflow.py not found at {workflow_py}. Run codegen first.")
 
+        # Unique timestamped directory for this run — never overwrites previous results
+        run_id  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = f"run_{run_id}"
+        work_dir_host    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work", run_dir)
+        work_dir_container = f"/app/work/{run_dir}"
+        os.makedirs(work_dir_host, exist_ok=True)
+
+        # Stage only user-selected data files into a per-run directory.
+        # This is what gets mounted as /app/data in the sandbox — nothing else.
+        import shutil as _shutil
+        data_staging_host = os.path.join(work_dir_host, "data")
+        os.makedirs(data_staging_host, exist_ok=True)
+        _src_data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        for _fname in state.get("data_files", []):
+            _src = os.path.join(_src_data_dir, _fname)
+            if os.path.isdir(_src):
+                _shutil.copytree(_src, os.path.join(data_staging_host, _fname), dirs_exist_ok=True)
+            elif os.path.isfile(_src):
+                _shutil.copy2(_src, os.path.join(data_staging_host, _fname))
+        data_staging_container = f"{HOST_REPO_PATH}/work/{run_dir}/data"
+        console.print(f"[dim cyan][executor] staged data files: {state.get('data_files', [])}[/dim cyan]")
+
+        _env_vars = state.get("stack_decision", {}).get("env_vars", {})
+        _env_flags = []
+        for _k, _v in _env_vars.items():
+            _env_flags += ["-e", f"{_k}={_v}"]
+
         cmd = [
             "docker", "run", "--rm",
             "-v", f"{HOST_REPO_PATH}:/app",
+            "-v", f"{data_staging_container}:/app/data",
             "-w", "/app/builds",
-            "-e", "LIBGL_ALWAYS_SOFTWARE=1",
-            "-e", "PYOPENGL_PLATFORM=osmesa",
-            "-e", "OVITO_GUI_MODE=0",
+            *_env_flags,
             image_tag,
             "python3", "workflow.py",
-            "--data-dir",  "/app/data",
-            "--work-dir",  "/app/work/run0",
+            "--data-dir", "/app/data",
+            "--work-dir", work_dir_container,
         ]
 
+        console.print(f"[dim cyan][executor] run directory: work/{run_dir}[/dim cyan]")
         console.print(f"[dim cyan][executor] command: {' '.join(cmd)}[/dim cyan]")
         console.print("[dim cyan][executor] this may take several minutes...[/dim cyan]")
 
@@ -783,6 +868,25 @@ def executor(state: AgentState) -> dict:
             f"=== STDERR ===\n{stderr}"
         )
 
+        # Save metadata alongside outputs for later analysis
+        metadata = {
+            "run_id":           run_id,
+            "goal":             state.get("goal", ""),
+            "paper":            state.get("pdf_path", ""),
+            "timestamp":        datetime.now().isoformat(),
+            "exit_code":        proc.returncode,
+            "image_tag":        image_tag,
+            "stack_decision":   state.get("stack_decision", {}),
+            "revisions": {
+                "planner":   state.get("planner_revisions",   0),
+                "installer": state.get("installer_revisions", 0),
+                "codegen":   state.get("codegen_revisions",   0),
+                "executor":  state.get("executor_revisions",  0),
+            },
+        }
+        with open(os.path.join(work_dir_host, "run_metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+
         color = "green" if proc.returncode == 0 else "red"
         console.print(Panel(
             combined[:6000],
@@ -793,7 +897,7 @@ def executor(state: AgentState) -> dict:
         if proc.returncode != 0:
             console.print(f"[red][executor] workflow exited with code {proc.returncode}[/red]")
         else:
-            console.print("[dim cyan][executor] workflow completed successfully[/dim cyan]")
+            console.print(f"[dim cyan][executor] workflow completed successfully — outputs in work/{run_dir}[/dim cyan]")
 
         return {
             "execution_output": [combined],
@@ -839,19 +943,29 @@ def skill_updater(state: AgentState) -> dict:
             f"Last orchestrator feedback: {feedback or '(none)'}\n"
             f"Literature findings count: {len(state.get('literature_findings', []))}\n"
             f"Tasks count: {len(state.get('tasks', []))}\n"
-            f"Stack decision: {state.get('stack_decision', [])}\n"
+            f"Stack decision: {json.dumps(state.get('stack_decision', {}), indent=2)}\n"
             f"Docker image tag: {state.get('image_tag') or 'maw-sandbox:latest'}\n"
             f"{exit_code_line}\n\n"
             f"Execution output (truncated):\n{execution_tail}"
         )
 
         # ── read current skill files ──────────────────────────────────────────
+        # Collect all knowledge skill files dynamically so new environment skills are picked up automatically
+        _knowledge_skills = [
+            f"knowledge/{os.path.splitext(f)[0].replace('.SKILL', '')}"
+            for f in os.listdir(os.path.join(_SKILLS_ROOT, "knowledge"))
+            if f.endswith(".SKILL.md")
+        ] if os.path.isdir(os.path.join(_SKILLS_ROOT, "knowledge")) else []
+
         skill_names = [
             "agents/orchestrator",
             "agents/planner",
+            "agents/installer",
             "agents/codegen",
+            *_knowledge_skills,
             "use_cases/molecular_nucleation/orchestrator",
             "use_cases/molecular_nucleation/planner",
+            "use_cases/molecular_nucleation/installer",
             "use_cases/molecular_nucleation/codegen",
             "systems/parsl",
         ]
@@ -872,8 +986,43 @@ def skill_updater(state: AgentState) -> dict:
             HumanMessage(content=context),
         ])
 
-        # ── write updated skill files ─────────────────────────────────────────
-        for update in result.updates:
+        # ── HITL: show proposed updates and ask before writing ───────────────
+        approved_updates = []
+        if not result.updates:
+            console.print("[dim cyan][skill_updater] no skill files needed updating this run[/dim cyan]")
+        else:
+            console.print(Panel(
+                "\n".join(
+                    f"  [bold]{u.skill_name}[/bold]\n    {u.reason}"
+                    for u in result.updates
+                ),
+                title="[bold yellow]Skill Updater — Proposed Changes[/bold yellow]",
+                border_style="yellow",
+            ))
+            try:
+                choice = input(
+                    "\nApply skill updates? [y = all / n = none / r = review each]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "n"
+                console.print("[yellow][skill_updater] non-interactive — skipping updates[/yellow]")
+
+            if choice == "y":
+                approved_updates = result.updates
+            elif choice == "r":
+                for update in result.updates:
+                    console.print(f"\n  [bold]{update.skill_name}[/bold]: {update.reason}")
+                    try:
+                        ans = input("  Apply this update? [y/n]: ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        ans = "n"
+                    if ans == "y":
+                        approved_updates.append(update)
+            else:
+                console.print("[dim cyan][skill_updater] updates skipped by user[/dim cyan]")
+
+        # ── write approved updates ────────────────────────────────────────────
+        for update in approved_updates:
             path = skill_path(update.skill_name)
             if not os.path.isfile(path):
                 console.print(f"[yellow][skill_updater] skipping unknown skill: {update.skill_name}[/yellow]")
@@ -881,11 +1030,8 @@ def skill_updater(state: AgentState) -> dict:
             with open(path, "w") as f:
                 f.write(update.updated_content)
             console.print(
-                f"[dim cyan][skill_updater] updated {update.skill_name}/SKILL.md - {update.reason}[/dim cyan]"
+                f"[dim cyan][skill_updater] updated {update.skill_name} — {update.reason}[/dim cyan]"
             )
-
-        if not result.updates:
-            console.print("[dim cyan][skill_updater] no skill files needed updating this run[/dim cyan]")
 
         console.print(Panel(
             result.summary,
@@ -985,12 +1131,48 @@ if __name__ == "__main__":
 
     console.print(f"[dim]Selected: {os.path.basename(pdf_path)}[/dim]")
 
+    # Data file selection
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    all_data_items = sorted(os.listdir(data_dir))
+
+    if not all_data_items:
+        console.print("[yellow]No files found in data/ — continuing with empty data directory.[/yellow]")
+        data_files = []
+    else:
+        console.print("\n[bold]Available data files/folders:[/bold]")
+        for i, name in enumerate(all_data_items, 1):
+            suffix = "/" if os.path.isdir(os.path.join(data_dir, name)) else ""
+            console.print(f"  {i}. {name}{suffix}")
+        console.print(f"  a. All")
+
+        raw = input("\nSelect files/folders to expose (e.g. 1,2,3 or 'a' for all): ").strip().lower()
+        if raw == "a" or raw == "":
+            data_files = all_data_items
+        else:
+            selected = []
+            for token in raw.replace(",", " ").split():
+                try:
+                    idx = int(token) - 1
+                    if 0 <= idx < len(all_data_items):
+                        selected.append(all_data_items[idx])
+                    else:
+                        console.print(f"[yellow]Skipping out-of-range index: {token}[/yellow]")
+                except ValueError:
+                    console.print(f"[yellow]Skipping unrecognized input: {token}[/yellow]")
+            data_files = selected
+
+        if not data_files:
+            console.print("[yellow]No items selected — continuing with empty data directory.[/yellow]")
+
+    console.print(f"[dim]Exposing: {', '.join(data_files) if data_files else 'none'}[/dim]")
+
     # Handle goal from args or interactive input
     if args.goal:
         goal = args.goal
     else:
         goal = input("\nDescribe your goal for this workflow: ").strip()
-    
+
     if not goal:
         console.print("[red]Goal cannot be empty.[/red]")
         raise SystemExit(1)
@@ -998,14 +1180,14 @@ if __name__ == "__main__":
     runs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
     os.makedirs(runs_dir, exist_ok=True)
     _run_log_path = os.path.join(runs_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jsonl")
-    console.print(f"[dim]Run log: {_run_log_path}[/dim]")
 
     initial_state = {
         "messages":              [],
         "goal":                  goal,
         "pdf_path":              pdf_path,
+        "data_files":            data_files,
         "literature_findings":   [],
-        "stack_decision":        [],
+        "stack_decision":        {},
         "tasks":                 [],
         "code_output":           [],
         "execution_output":      [],
@@ -1020,6 +1202,8 @@ if __name__ == "__main__":
         "codegen_revisions":     0,
         "executor_revisions":    0,
         "skill_update_summary":  "",
+        "build_attempt":         0,
+        "build_error":           "",
     }
 
     app.invoke(initial_state)
