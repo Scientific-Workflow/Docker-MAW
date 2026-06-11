@@ -21,7 +21,7 @@ Loaded on every executor() call.
 
 The executor calls `conda run -n maw_sandbox python3 builds/workflow.py` with `--data-dir` and `--work-dir` pointing to real host paths. Each run gets a unique timestamped directory (`work/run_YYYYMMDD_HHMMSS/`) so results are never overwritten. Returns the full stdout/stderr and exit code in `execution_output`.
 
-No containers, no Docker, no volume mounts.
+Uses real host paths via `conda run` — no volume mounts.
 
 ---
 
@@ -45,7 +45,7 @@ for k, v in state["stack_decision"]["env_vars"].items():
     run_env[k] = v
 ```
 
-Pass `env=run_env` to `subprocess.run`. Do NOT use `-e` flags — there is no Docker.
+Pass `env=run_env` to `subprocess.run`. Do NOT use `-e` flags — env_vars go into the subprocess env dict, not CLI flags.
 
 ### Step 4: Run the workflow
 
@@ -72,7 +72,7 @@ Capture stdout + stderr. Prepend exit code line. Return in `execution_output`.
 ## Key Rules and Constraints
 
 - Pass ONLY `--data-dir` and `--work-dir` to workflow.py
-- `--data-dir` and `--work-dir` are REAL HOST PATHS — no `/app/` container paths
+- `--data-dir` and `--work-dir` are real host filesystem paths
 - env_vars go into the subprocess env dict, not as CLI flags
 - Exit code 0 = success; anything else = failure
 - `--no-capture-output` is required on `conda run` so stdout/stderr flow normally to the calling process

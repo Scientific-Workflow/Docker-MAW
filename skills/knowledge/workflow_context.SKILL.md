@@ -41,7 +41,7 @@ All agents communicate through `AgentState` (a LangGraph TypedDict). The orchest
 
 ## Conda Sandbox Model
 
-The MAW agent runs as a Python process (in its own venv or conda env). Generated workflows run in a separate `maw_sandbox` conda environment created by the installer. There is no Docker container involved.
+The MAW agent runs as a Python process (in its own venv or conda env). Generated workflows run in a separate `maw_sandbox` conda environment created by the installer. 
 
 ```
 Host machine
@@ -51,7 +51,7 @@ Host machine
             └── workflow.py runs in maw_sandbox with real host paths
 ```
 
-All paths are real host filesystem paths. The workflow receives `--data-dir` and `--work-dir` as absolute paths and uses them directly — no container paths, no `/app/` prefix.
+All paths are real host filesystem paths. The workflow receives `--data-dir` and `--work-dir` as absolute paths and uses them directly.
 
 ---
 

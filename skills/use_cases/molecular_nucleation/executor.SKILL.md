@@ -3,7 +3,7 @@ name: use_cases/molecular_nucleation/executor
 description: >
   Executor rules for the molecular nucleation project. Covers expected output files,
   exit code interpretation, and stale data warnings. Workflow runs via conda run
-  with real host paths — no Docker container.
+  with real host paths.
 ---
 
 # Molecular Nucleation — Executor Skill
@@ -42,7 +42,7 @@ conda run -n maw_sandbox --no-capture-output \
 ```
 
 Pass ONLY `--data-dir` and `--work-dir`. No `--input-script`.
-All paths are real host filesystem paths — no `/app/` container paths.
+All paths are real host filesystem paths.
 
 env_vars from `stack_decision` (e.g. `LIBGL_ALWAYS_SOFTWARE=1`) are passed via `subprocess env=` dict, not as `-e` flags.
 

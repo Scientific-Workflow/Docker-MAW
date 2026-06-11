@@ -1,32 +1,20 @@
 ---
 name: use_cases/molecular_nucleation/installer
 description: >
-  Installer knowledge for molecular nucleation workflows. Provides verified build
-  recipes for LAMMPS source build (no MPI) inside a conda environment, OSMesa
-  headless setup, and platform gotchas. The installer generates environment.yml +
-  install.sh from the planner's stack_decision — this skill provides the
-  domain-specific build knowledge to do that correctly.
+  Installer knowledge for molecular nucleation workflows. Provides the verified LAMMPS
+  source build recipe (cmake flags, package list, install sequence) and OVITO headless
+  rendering packages. Use this for the exact HOW — the WHY is in knowledge/local_machine.
 ---
 
 # Molecular Nucleation — Installer Skill
 
-Domain-specific conda environment construction knowledge for workflows that use LAMMPS, OVITO, and Parsl.
+Verified build recipes for LAMMPS, OVITO, and Parsl in the `maw_sandbox` conda env.
 
 ---
 
-## Your Job
+## LAMMPS Source Build — install.sh Recipe
 
-The planner has already decided what to install. Your job is to write a correct `environment.yml` and `install.sh` that builds it. This skill provides the verified build recipes and known platform gotchas for the tools in this domain.
-
----
-
-## LAMMPS Source Build (no MPI) — install.sh
-
-When `stack_decision.special_installs` includes `lammps_source_build_no_mpi`:
-
-**Why source build:** The `pip install lammps` wheel calls `MPI_Init` on import even in serial mode. Source build with `-DBUILD_MPI=off` has zero MPI dependency and runs reliably in a conda env without a running MPI daemon.
-
-**Verified install.sh sequence:**
+When `stack_decision.special_installs` includes `lammps_source_build_no_mpi`, use this exact sequence:
 
 ```bash
 #!/bin/bash
@@ -59,21 +47,22 @@ pip install .
 rm -rf /tmp/lammps-stable_2Aug2023_update3 /tmp/stable_2Aug2023_update3.tar.gz
 ```
 
-**`-DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX` is mandatory.** Without it, cmake defaults to `/root/.local` or `/usr/local`, outside the conda env. `liblammps.so` will not be found by Python inside the env.
-
-**`-DCMAKE_PREFIX_PATH=$CONDA_PREFIX` is mandatory.** This tells cmake to find FFTW3, libpng, zlib, etc. from the conda env rather than the system. Without it, cmake finds wrong or missing libraries.
-
-**`-DFFTW3_ROOT=$CONDA_PREFIX`** ensures the FFTW3 cmake module finds the conda-forge `fftw` package.
-
-**`pip install .` (not `pip install . --break-system-packages`).** In a conda env, pip does not need `--break-system-packages`. Adding it causes a warning or error.
-
-**After install, `liblammps.so` is in `$CONDA_PREFIX/lib`.** The executor passes `LD_LIBRARY_PATH` via env_vars, so no post-install ldconfig needed.
+**Flag notes:**
+- `-DCMAKE_INSTALL_PREFIX=$CONDA_PREFIX` — mandatory; without it cmake installs outside the conda env and `liblammps.so` won't be found
+- `-DCMAKE_PREFIX_PATH=$CONDA_PREFIX` — mandatory; tells cmake to find FFTW3, libpng, zlib from conda-forge rather than the system
+- `-DFFTW3_ROOT=$CONDA_PREFIX` — ensures the FFTW3 cmake module finds the conda-forge `fftw` package
+- `-DBUILD_MPI=off` — mandatory; see `knowledge/local_machine` for why
+- `pip install .` — no `--break-system-packages` flag; not needed inside a conda env
 
 ---
 
-## Required environment.yml entries for LAMMPS build
+## Required environment.yml — LAMMPS Build Dependencies
 
 ```yaml
+name: maw_sandbox
+channels:
+  - conda-forge
+  - defaults
 dependencies:
   - python=3.11
   - cmake
@@ -87,6 +76,10 @@ dependencies:
   - wget
   - git
   - pip
+  - mesalib
+  - glib
+  - dbus
+  - xkeyboard-config
   - pip:
     - ovito
     - "parsl>=2024.0.0"
@@ -95,38 +88,19 @@ dependencies:
     - Pillow
 ```
 
-`mesalib` for headless rendering (covers OSMesa):
-```yaml
-  - mesalib
-  - glib
-```
+`mesalib`, `glib`, `dbus`, `xkeyboard-config` are required by OVITO at import for headless rendering. Missing any of these causes OVITO to crash on import even when rendering is disabled.
 
 ---
 
-## Headless Rendering (OVITO + matplotlib)
+## env_vars — What Goes Where
 
-When `stack_decision.env_vars` includes `LIBGL_ALWAYS_SOFTWARE`, `PYOPENGL_PLATFORM`, or `OVITO_GUI_MODE`:
+`env_vars` from `stack_decision` are passed by the executor at runtime — the installer does NOT write them into `environment.yml`. For this workflow the required runtime vars are:
 
-Add to `environment.yml` dependencies:
-```yaml
-  - mesalib
-  - glib
-  - dbus
-  - xkeyboard-config
-```
+| Var | Value | Purpose |
+|---|---|---|
+| `LIBGL_ALWAYS_SOFTWARE` | `1` | Forces OSMesa software rendering |
+| `PYOPENGL_PLATFORM` | `osmesa` | Tells PyOpenGL to use OSMesa backend |
+| `OVITO_GUI_MODE` | `0` | Disables OVITO GUI entirely |
+| `LD_LIBRARY_PATH` | `$CONDA_PREFIX/lib` | Makes `liblammps.so` findable after source build |
 
-The env_vars themselves (`LIBGL_ALWAYS_SOFTWARE=1`, `PYOPENGL_PLATFORM=osmesa`, `OVITO_GUI_MODE=0`) are NOT written into `environment.yml` — they are passed by the executor at runtime via the subprocess env dict.
-
----
-
-## Hash-Based Rebuild Skip
-
-The Phase 2 build is skipped if the MD5 hash of (`environment.yml` + `install.sh`) matches `builds/.env_spec_hash` AND the `maw_sandbox` env exists. This means the ~20 minute LAMMPS build only runs when the spec actually changes.
-
----
-
-## env_vars in stack_decision
-
-`env_vars` (e.g., `LD_LIBRARY_PATH=/path`) are NOT added to `environment.yml`. They are passed by the executor to `conda run` via `subprocess env=` dict. Include them in `stack_decision` for the executor to pick up — the installer does not touch them.
-
-The one exception: `LD_LIBRARY_PATH=$CONDA_PREFIX/lib` may need to be set at workflow runtime so LAMMPS's `liblammps.so` can be found. The planner should include `"LD_LIBRARY_PATH": "$CONDA_PREFIX/lib"` in `env_vars` — the executor expands environment variables in the subprocess env automatically.
+These must be in `stack_decision.env_vars` so the executor picks them up. Do not put them in `environment.yml`.

@@ -20,4 +20,4 @@ This skill is a placeholder. Populate with specifics when an ADIOS2 workflow is 
 ## Notes
 
 - ADIOS2 Python bindings: `import adios2`
-- Not currently in the MAW sandbox Dockerfile
+- Not currently in the maw_sandbox conda environment

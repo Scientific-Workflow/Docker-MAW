@@ -23,9 +23,9 @@ Load when planning any molecular nucleation or water crystallization workflow. P
 
 Before extracting anything from the paper, read the goal. The user specifies where the workflow must run. Load the matching knowledge skill and build the entire plan for that environment.
 
-- Goal says "local", "my machine", "Docker" → load `knowledge/local_docker`, plan for serial execution in a Docker container
-- Goal says "LCRC", "Argonne", "cluster", "Singularity" → load `knowledge/lcrc`, plan for Singularity container execution on LCRC
-- Goal says "HPC", "cluster", "SLURM" (generic, not LCRC) → load the appropriate HPC knowledge skill, plan for that environment
+- Goal says "local", "my machine", "locally", "workstation" → load `knowledge/local_machine`, plan for serial execution in a conda environment
+- Goal says "LCRC", "Argonne", "cluster", "HPC" → load `knowledge/lcrc`, plan for conda execution on LCRC
+- Goal says "HPC", "cluster", "SLURM" (generic, not LCRC) → load the appropriate HPC knowledge skill
 
 **Do not default to the paper's HPC environment just because that is what the paper describes. Plan for what the user asked for.**
 
@@ -33,7 +33,7 @@ Before extracting anything from the paper, read the goal. The user specifies whe
 
 ## Data Files — Match Paper to What's Available
 
-The user's prompt includes an **"Available data files"** list — the exact files present in `/app/data/`. You MUST use this list to determine input filenames. Do NOT assume or invent filenames.
+The user's prompt includes an **"Available data files"** list — the exact files present in the data directory. You MUST use this list to determine input filenames. Do NOT assume or invent filenames.
 
 - **Input script**: find the file that matches what the paper calls its LAMMPS input script
 - **Force field file**: find the file that matches the potential the paper uses
@@ -66,35 +66,36 @@ Put the exact matched filenames in your tasks so codegen uses them directly. If 
 
 ### HPC context to note
 
-Note what parallelization and infrastructure the paper used — MPI ranks, number of nodes, SLURM scripts. Record these in `literature_findings` for completeness, but do NOT reproduce them in `stack_decision` or tasks. The `knowledge/local_docker` skill tells you how to translate these to local equivalents.
+Note what parallelization and infrastructure the paper used — MPI ranks, number of nodes, SLURM scripts. Record these in `literature_findings` for completeness, but do NOT reproduce them in `stack_decision` or tasks if the user defined runtime environment is set to local machine. The `knowledge/local_machine` skill tells you how to translate these to local equivalents.
+However if the runtime environment is set to LCRC or HPC, you are allowed freedom to include those details.
 
 ---
 
-## HPC-to-Local Translation for This Domain
+## HPC-to-Local Translation for This Domain (ONLY USE WHEN USER RUNTIME ENVIRONMENT IS SET TO LOCAL MACHINE)
 
-Apply these translations when building `stack_decision` and tasks. The WHY behind each translation is in `knowledge/local_docker`.
+Apply these translations when building `stack_decision` and tasks. The full reasoning is in `knowledge/local_machine`.
 
-| Paper says | Local translation |
+| Paper says | Conda translation |
 |---|---|
 | `mpirun -np N lammps -in script.in` | `from lammps import lammps; lmp = lammps(cmdargs=["-screen","none"]); lmp.file(...)` |
-| `pip install lammps` | Source build with `BUILD_MPI=off` (pip wheel calls MPI_Init and crashes — see local_docker) |
-| `module load lammps` | LAMMPS installed in Dockerfile via source build |
-| `module load ovito` | `pip3 install ovito --break-system-packages` |
+| `pip install lammps` | Source build with `BUILD_MPI=off` (pip wheel calls MPI_Init on import and crashes) |
+| `module load lammps` | LAMMPS source build in `install.sh` with `$CONDA_PREFIX` as prefix |
+| `module load ovito` | `pip: ovito` in `environment.yml` |
 | Parsl with SlurmProvider | Parsl with LocalProvider + HighThroughputExecutor |
-| OVITO headless rendering | Requires osmesa apt packages + headless env vars |
+| OVITO headless rendering | Requires mesalib + headless env vars in stack_decision.env_vars |
 
 ---
 
 ## Stack Decision Guidance for This Domain
 
-Use this as a reasoning starting point, not a locked list. The actual `stack_decision` must come from reading the paper and applying the local_docker translations. Different nucleation papers may use different force fields, different analysis tools, or additional packages.
+Use this as a reasoning starting point, not a locked list. The actual `stack_decision` must come from reading the paper and applying the local_machine translations. Different nucleation papers may use different force fields, different analysis tools, or additional packages.
 
 **Typical base:**
-- `base_image`: `"ubuntu:24.04"`
-- `apt_packages`: system libs for building LAMMPS from source + osmesa for headless OVITO rendering
+- `base_image`: `"maw_sandbox"`
+- `apt_packages`: system libs for building LAMMPS from source + osmesa for headless OVITO rendering (installer translates these to conda-forge packages)
 - `pip_packages`: ovito, parsl>=2024.0.0, numpy, matplotlib, and any paper-specific analysis packages
-- `special_installs`: LAMMPS source build if the paper uses LAMMPS (check `knowledge/local_docker` for the MPI trap)
-- `env_vars`: headless rendering vars if OVITO or matplotlib visualization is involved
+- `special_installs`: LAMMPS source build if the paper uses LAMMPS (see `knowledge/local_machine` for the MPI trap WHEN USER RUNTIME ENVIRONMENT IS SET TO LOCAL MACHINE)
+- `env_vars`: headless rendering vars + `LD_LIBRARY_PATH=$CONDA_PREFIX/lib` for source-built LAMMPS
 
 If the paper uses GROMACS instead of LAMMPS, or a different analysis tool instead of OVITO, adjust accordingly. Do not default to the LAMMPS+OVITO stack just because it is familiar.
 
@@ -124,7 +125,7 @@ Cubic ice count = types 1 + 2 + 3. Hexagonal ice count = types 4 + 5 + 6.
 
 These are examples of the right level of detail. Do not copy them verbatim — derive tasks from what the paper actually describes. Adjust function names, parameters, and steps to match the specific paper's workflow.
 
-**Good level of detail:**
+**Good level of detail (NOT SPECIFIC PROTOCOL OR GUIDELINES JUST A GENERAL EXAMPLE):**
 > "Write a Parsl @python_app to run the LAMMPS simulation using its Python API (not subprocess). Copy the force field and initial configuration files into the working directory before running. Copy the input script fresh every run — never skip, the user may have updated it. Change directory into the work folder BEFORE initializing LAMMPS because dump file paths in the input script are relative to CWD. Return the path to the directory where trajectory frames were written."
 
 > "Write a Parsl @python_app to analyze the trajectory with OVITO's IdentifyDiamondModifier. For each frame, count cubic ice as structure types 1+2+3 combined and hexagonal ice as types 4+5+6 combined — not type 1 and type 3 only, which misses most crystal atoms. Write results to CSV with columns: frame, timestep, cubic_count, hexagonal_count."
@@ -139,14 +140,14 @@ These are examples of the right level of detail. Do not copy them verbatim — d
 
 ## Key Rules
 
-- Do NOT add tasks for "install LAMMPS" or "build Docker image" — the installer handles that
+- Do NOT add tasks for "install LAMMPS" or "build the conda environment" — the installer handles that
 - The input script (`in.watbox` or equivalent) is user-controlled — codegen must use it as-is, never modify it
 - If the paper states a parameter not present in the user's input script, record it in `literature_findings` but do NOT instruct codegen to hardcode it
 - Do NOT assume the Tersoff AW force field — extract which force field the paper actually uses
 
 ---
 
-## Example Output Structure
+## Example Output Structure (NOT SPECIFIC PROTOCOL OR GUIDELINES JUST A GENERAL EXAMPLE)s
 
 ```json
 {
@@ -155,15 +156,15 @@ These are examples of the right level of detail. Do not copy them verbatim — d
     "NPT ensemble at 180 K, 1.0 atm, timestep 0.01 ps, run 9000 steps",
     "Ice structure detection via OVITO IdentifyDiamondModifier",
     "Cubic diamond (types 1-3) and hexagonal diamond (types 4-6) tracked per frame",
-    "Paper ran on 8 MPI ranks on HPC cluster — translated to serial local execution"
+    "Paper ran on 8 MPI ranks on HPC cluster — translated to serial conda env execution"
   ],
   "stack_decision": {
-    "base_image": "ubuntu:24.04",
-    "apt_packages": ["python3", "python3-pip", "..."],
+    "base_image": "maw_sandbox",
+    "apt_packages": ["build-essential", "cmake", "libfftw3-dev", "libpng-dev", "libjpeg-dev", "libosmesa6", "libgl1", "libegl1", "libopengl0", "libglib2.0-0", "libxkbcommon0", "libdbus-1-3"],
     "pip_packages": ["ovito", "parsl>=2024.0.0", "numpy", "matplotlib", "Pillow"],
-    "special_installs": [{"name": "lammps_source_build_no_mpi", "reason": "..."}],
-    "env_vars": {"LIBGL_ALWAYS_SOFTWARE": "1", "PYOPENGL_PLATFORM": "osmesa", "OVITO_GUI_MODE": "0", "LD_LIBRARY_PATH": "/usr/local/lib"},
-    "workdir": "/app"
+    "special_installs": [{"name": "lammps_source_build_no_mpi", "reason": "pip wheel calls MPI_Init on import and crashes; source build with BUILD_MPI=off has zero MPI dependency"}],
+    "env_vars": {"LIBGL_ALWAYS_SOFTWARE": "1", "PYOPENGL_PLATFORM": "osmesa", "OVITO_GUI_MODE": "0", "LD_LIBRARY_PATH": "$CONDA_PREFIX/lib"},
+    "workdir": "."
   },
   "tasks": [
     "Define Parsl config with LocalProvider + HighThroughputExecutor ...",

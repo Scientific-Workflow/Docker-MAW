@@ -243,7 +243,7 @@ s
 
 **| Ambiguous instruction | Ask one targeted clarifying question | Guess and proceed silently |**
 
-**| Dependency not installed | Run `pip install X --break-system-packages` | Fail with a raw traceback |**
+**| Dependency not installed | Run `pip install X` inside the conda env | Fail with a raw traceback |**
 
 
 
@@ -360,7 +360,7 @@ s
 
 **- \*\*Claude Code specifics:\*\* This skill assumes access to `Bash`, `Read`, `Write`, and `Edit` tools. If running in a restricted environment, fall back to \[alternative approach].**
 
-**- \*\*Package installs:\*\* Always use `pip install <pkg> --break-system-packages` in the Claude Code sandbox.**
+**- \*\*Package installs:\*\* Always use `pip install <pkg>` in the maw_sandbox conda environment — no `--break-system-packages` needed.**
 
 **- \*\*Gotcha:\*\* \[Known failure mode and how to avoid it]**
 

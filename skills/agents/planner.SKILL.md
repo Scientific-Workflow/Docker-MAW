@@ -31,10 +31,10 @@ Before extracting anything from the paper, read the goal and identify the target
 
 | Goal says | Environment to plan for | Knowledge skill to load |
 |---|---|---|
-| "local machine", "my laptop", "Docker", "locally", "container" | Docker container (local) | `knowledge/local_docker` |
-| "Docker on HPC", "Singularity", "Shifter", "container on cluster" | Docker container (HPC node) | `knowledge/local_docker` — same container constraints apply |
+| "local machine", "my laptop", "locally", "conda", "workstation" | Conda environment (local) | `knowledge/local_machine` |
+| "LCRC", "Argonne", "cluster", "HPC" | Conda environment (LCRC) | `knowledge/lcrc` + `knowledge/local_machine` |
 | "HPC natively", "SLURM directly", "real MPI", "bare metal cluster" | Native HPC, no container | `knowledge/hpc_argonne` (if available) |
-| Not specified | Default to local Docker | `knowledge/local_docker` |
+| Not specified | Default to conda environment | `knowledge/local_machine` |
 
 Load the matching knowledge skill on your first call. That skill defines what the target environment can do, what it cannot do, and what a complete `stack_decision` must look like for it. **You must plan for the environment in the knowledge skill — not for the environment in the paper.**
 
@@ -47,7 +47,7 @@ On your **first call**, request:
 2. The use-case skill for the specific workflow type
 3. Any system skills for frameworks the workflow uses
 
-Example for local execution: `"skill_requests": ["knowledge/local_docker", "use_cases/molecular_nucleation/planner", "systems/parsl"]`
+Example for local execution: `"skill_requests": ["knowledge/local_machine", "use_cases/molecular_nucleation/planner", "systems/parsl"]`
 
 Leave `skill_requests` empty on all subsequent calls.
 
@@ -100,7 +100,7 @@ Break each @python_app into multiple tasks:
 - Any output file with a specific format or naming convention
 - The launcher script is always a separate task
 
-### Example — 4 tasks for one @python_app
+### Example (THIS IS ONLY AN EXAMPLE NOT A SPECIFIC GUIDELINE OF PROTOCOL) — 4 tasks for one @python_app
 
 Instead of: `"Define run_simulation that copies files, runs the tool, returns output path"`
 
@@ -147,4 +147,4 @@ Before finalizing:
 - [ ] Specific API names used — not vague descriptions
 - [ ] main() argparse interface explicitly specified
 - [ ] Launcher script is a separate task
-- [ ] No environment-incompatible tools in tasks (e.g., no mpirun if target is local Docker)
+- [ ] No environment-incompatible tools in tasks (e.g., no mpirun if target is local machine)

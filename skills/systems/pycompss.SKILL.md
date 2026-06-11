@@ -23,4 +23,4 @@ This skill is a placeholder. Populate with specifics when a PyCOMPSs workflow is
 ## Notes
 
 - PyCOMPSs requires the COMPSs runtime installed separately
-- Not currently in the MAW sandbox Dockerfile
+- Not currently in the maw_sandbox conda environment

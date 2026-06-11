@@ -116,7 +116,7 @@ If the goal says "local machine" and you cannot determine the OS, check `platfor
 | `git` | `git` |
 | `python3`, `python3-pip`, `python3-dev` | covered by `python=3.11` |
 
-`base_image` and `workdir` from `stack_decision` are ignored — no container.
+`base_image` and `workdir` from `stack_decision` are ignored — installer writes only environment.yml and install.sh.
 
 ---
 
