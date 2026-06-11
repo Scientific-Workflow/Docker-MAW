@@ -1,0 +1,28 @@
+name: maw_sandbox
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.11
+  - cmake
+  - gcc
+  - gxx_linux-64
+  - make
+  - wget
+  - git
+  - fftw
+  - libpng
+  - libjpeg-turbo
+  - zlib
+  - mesalib
+  - glib
+  - xkeyboard-config
+  - dbus
+  - ffmpeg
+  - pip
+  - pip:
+    - ovito
+    - "parsl>=2024.0.0"
+    - numpy
+    - matplotlib
+    - Pillow

@@ -309,7 +309,7 @@ def _read_skill(rel_path: str) -> str:
     """Read skills/<rel_path>.SKILL.md — returns '' if not found."""
     full = os.path.join(_SKILLS_ROOT, rel_path + ".SKILL.md")
     if os.path.isfile(full):
-        with open(full) as f:
+        with open(full, encoding="utf-8") as f:
             return f.read()
     return ""
 
@@ -545,7 +545,7 @@ def installer(state: AgentState) -> dict:
 
         if state.get("env_spec_approved"):
             # ── Phase 2: spec approved — create/update conda env ─────────────
-            conda_bin = shutil.which("conda")
+            conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
             if not conda_bin:
                 console.print(
                     "[yellow][installer] conda not found in PATH. "
