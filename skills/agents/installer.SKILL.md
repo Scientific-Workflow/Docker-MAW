@@ -79,12 +79,30 @@ dependencies:
     - Pillow
 ```
 
+---
+
+## Platform Awareness — Windows vs Linux
+
+**`gxx_linux-64` is Linux-only.** If the target machine is Windows, `conda env create` will fail immediately because this package does not exist for the `win-64` platform.
+
+Rule: **source builds (LAMMPS, anything in install.sh) do not work natively on Windows.** `bash`, `/tmp`, `make -j$(nproc)`, and Linux compiler packages all assume a Linux environment.
+
+| Situation | What to do |
+|---|---|
+| Target is Linux (LCRC, WSL, any Linux machine) | Use `gcc`, `gxx_linux-64`, `make` — normal flow |
+| Target is Windows (native PowerShell/cmd) | Do NOT generate install.sh with bash commands. Warn the user that source builds require WSL or a Linux machine. |
+| Target is Windows + WSL | Treat as Linux — run `python agent.py` from inside WSL, not from PowerShell |
+
+If the goal says "local machine" and you cannot determine the OS, check `platform.system()` output in state or ask the orchestrator to note it. When in doubt, generate Linux-compatible packages — they are correct for LCRC and any Linux host.
+
+---
+
 ### apt_packages → conda-forge translation table
 
 | apt_packages entry | conda-forge equivalent |
 |---|---|
 | `cmake` | `cmake` |
-| `build-essential` | `gcc`, `gxx_linux-64`, `make` |
+| `build-essential` | `gcc`, `gxx_linux-64`, `make` (**Linux only** — see Platform Awareness above) |
 | `libfftw3-dev` | `fftw` |
 | `libpng-dev` | `libpng` |
 | `libjpeg-dev` | `libjpeg-turbo` |

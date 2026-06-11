@@ -46,6 +46,14 @@ If the planner's plan would only work on an HPC cluster and not in the actual ta
 
 ## When to Route Each Direction
 
+### Platform check — do this BEFORE routing after planner
+
+Read `goal`. If the user says "local machine" or "my machine", determine whether the target OS is Windows or Linux.
+
+- **Windows (native):** Source builds (LAMMPS, anything requiring `bash`/`gcc`/`make`) will NOT work. `gxx_linux-64` does not exist on Windows conda. Route back to planner with feedback to note the target is Windows and source builds require WSL or a Linux machine.
+- **Linux / LCRC / WSL:** Normal flow — `gxx_linux-64`, `bash`, `/tmp`, `make -j$(nproc)` all work.
+- **Ambiguous:** Default to Linux-compatible packages — they work on LCRC and any Linux host.
+
 ### After planner — route BACK if:
 - Tasks are vague (no specific function names, no API calls specified)
 - Simulation parameters are missing (temperature, timestep, run length, force field)
